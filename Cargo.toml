@@ -5,6 +5,7 @@ edition = "2021"
 description = "Operational memory runtime for autonomous fleets — MVP simulate-before-act experiment"
 license = "MIT"
 repository = "https://github.com/nathan-luckock/aegis-fabric"
+default-run = "aegis"
 
 [lints.rust]
 unsafe_code = "forbid"

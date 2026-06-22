@@ -23,6 +23,28 @@ impl fmt::Display for RobotId {
     }
 }
 
+/// The two independent root causes a scenario can carry. They surface with the
+/// same symptom (B loses localization) but demand *different* fixes — which is
+/// what makes diagnosis matter.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Fault {
+    /// Charger fault → A drains → A drops offline → its beacon goes dark.
+    /// Root fix: recover A's power (failover the charger).
+    PowerCascade,
+    /// A is healthy, but radio interference jams its beacon channel.
+    /// Root fix: retune the beacon to a clear channel.
+    Interference,
+}
+
+impl Fault {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Fault::PowerCascade => "power-cascade",
+            Fault::Interference => "interference",
+        }
+    }
+}
+
 /// Candidate recovery actions the runtime can choose between at a decision point.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Action {
@@ -40,16 +62,20 @@ pub enum Action {
     PromoteCToBeacon,
     /// Safe-mode: halt B's motion. Always safe, never a full recovery.
     HaltB,
+    /// Retune A's beacon to a clear channel — the root fix for interference,
+    /// useless against a power cascade (A is offline, not jammed).
+    SwitchBeaconChannel,
 }
 
 impl Action {
-    pub fn all() -> [Action; 5] {
+    pub fn all() -> [Action; 6] {
         [
             Action::DoNothing,
             Action::FailoverCharger,
             Action::RestartRobotA,
             Action::PromoteCToBeacon,
             Action::HaltB,
+            Action::SwitchBeaconChannel,
         ]
     }
 
@@ -60,6 +86,7 @@ impl Action {
             Action::RestartRobotA => "restart-A",
             Action::PromoteCToBeacon => "promote-C-beacon",
             Action::HaltB => "halt-B",
+            Action::SwitchBeaconChannel => "switch-channel",
         }
     }
 }
@@ -76,8 +103,13 @@ impl fmt::Display for Action {
 pub enum Symptom {
     Nominal,
     BatteryDraining,
-    /// Beacon lost and B is losing localization — the dangerous symptom.
+    /// Beacon lost, B drifting — root cause unknown (the *coarse* symptom, used
+    /// by the no-diagnosis baseline).
     BeaconLostBDrifting,
+    /// Beacon lost because A lost power (A offline/draining).
+    BeaconLostPower,
+    /// Beacon lost because A's channel is jammed (A still online).
+    BeaconLostInterference,
 }
 
 impl Symptom {
@@ -86,6 +118,8 @@ impl Symptom {
             Symptom::Nominal => "nominal",
             Symptom::BatteryDraining => "battery-draining",
             Symptom::BeaconLostBDrifting => "beacon-lost-B-drifting",
+            Symptom::BeaconLostPower => "beacon-lost-power",
+            Symptom::BeaconLostInterference => "beacon-lost-interference",
         }
     }
 }
@@ -95,15 +129,15 @@ impl Symptom {
 #[derive(Clone, Copy, Debug)]
 pub struct Params {
     pub horizon: u32,
-    pub a_drain_per_tick: f64,  // A battery loss/tick while the charger is faulted
-    pub charge_per_tick: f64,   // battery gain/tick when a healthy charger is present
+    pub a_drain_per_tick: f64, // A battery loss/tick while the charger is faulted
+    pub charge_per_tick: f64,  // battery gain/tick when a healthy charger is present
     pub a_offline_battery: f64, // A drops offline below this battery
-    pub a_online_battery: f64,  // A only comes back online above this (hysteresis)
-    pub localize_gain: f64,     // B localization gain/tick with a beacon
-    pub localize_decay: f64,    // B localization loss/tick with no beacon
+    pub a_online_battery: f64, // A only comes back online above this (hysteresis)
+    pub localize_gain: f64,    // B localization gain/tick with a beacon
+    pub localize_decay: f64,   // B localization loss/tick with no beacon
     pub localize_safe_min: f64, // below this while moving => dangerous
-    pub localize_good: f64,     // at/above this => fully recovered
-    pub restart_downtime: u32,  // ticks A is offline during a restart
+    pub localize_good: f64,    // at/above this => fully recovered
+    pub restart_downtime: u32, // ticks A is offline during a restart
 }
 
 impl Params {
@@ -132,9 +166,9 @@ mod tests {
     #[test]
     fn actions_enumerate_with_unique_labels() {
         let all = Action::all();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 6);
         let labels: HashSet<_> = all.iter().map(|a| a.label()).collect();
-        assert_eq!(labels.len(), 5, "every action label must be distinct");
+        assert_eq!(labels.len(), 6, "every action label must be distinct");
     }
 
     #[test]

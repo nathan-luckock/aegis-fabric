@@ -7,19 +7,50 @@
 //! what keeps "simulate-before-act helps" from being a tautology.
 
 use crate::event::{EventKind, EventLog};
-use crate::model::{Action, Params, RobotId, Symptom};
+use crate::model::{Action, Fault, Params, RobotId, Symptom};
 use crate::rng::Rng;
 
-/// Per-scenario initial conditions. These three variables decide which recovery
-/// action is actually best, so a fixed reactive rule cannot always be right.
+/// Per-scenario initial conditions. The fault type plus these variables decide
+/// which recovery action is actually best, so a fixed reactive rule cannot
+/// always be right — and the right *root* fix differs by fault, so diagnosis
+/// matters.
 #[derive(Clone, Copy, Debug)]
 pub struct ScenarioCfg {
+    /// Which root cause this incident carries.
+    pub fault: Fault,
     /// Is spare robot C online and charged enough to serve as a beacon?
     pub c_ready: bool,
     /// How fast A recharges under failover (degraded batteries recharge slowly).
+    /// Only relevant to a power cascade.
     pub charge_rate: f64,
-    /// A's starting battery — sets how long until the cascade begins.
+    /// A's starting battery — sets how long until a power cascade begins.
     pub a_init: f64,
+    /// Tick at which interference jams A's beacon (ignored for a power cascade).
+    pub jam_at: u32,
+}
+
+impl ScenarioCfg {
+    /// A power-cascade scenario (charger fault).
+    pub fn power(c_ready: bool, charge_rate: f64, a_init: f64) -> Self {
+        ScenarioCfg {
+            fault: Fault::PowerCascade,
+            c_ready,
+            charge_rate,
+            a_init,
+            jam_at: 0,
+        }
+    }
+
+    /// An interference scenario (beacon jammed at `jam_at`).
+    pub fn interference(c_ready: bool, jam_at: u32) -> Self {
+        ScenarioCfg {
+            fault: Fault::Interference,
+            c_ready,
+            charge_rate: 4.0,
+            a_init: 50.0,
+            jam_at,
+        }
+    }
 }
 
 /// The outcome the experiment scores.
@@ -47,6 +78,8 @@ pub struct SimState {
     pub a_restart_until: Option<u32>,
     pub beacon_source: RobotId,
     pub beacon_up: bool,
+    pub beacon_jammed: bool,
+    pub jam_at: Option<u32>,
     pub c_ready: bool,
     pub b_localization: f64,
     pub b_in_motion: bool,
@@ -57,10 +90,13 @@ pub struct SimState {
 
 impl SimState {
     pub fn initial(cfg: &ScenarioCfg) -> Self {
+        let interference = cfg.fault == Fault::Interference;
         SimState {
             tick: 0,
             decision_tick: 0,
-            charger_faulted: true, // the incident is already underway: charger has faulted
+            // Power cascade: the charger has faulted and A is draining.
+            // Interference: the charger is healthy; the jam arrives at jam_at.
+            charger_faulted: !interference,
             failover_active: false,
             charge_rate: cfg.charge_rate,
             a_battery: cfg.a_init,
@@ -68,6 +104,8 @@ impl SimState {
             a_restart_until: None,
             beacon_source: RobotId::A,
             beacon_up: true,
+            beacon_jammed: false,
+            jam_at: if interference { Some(cfg.jam_at) } else { None },
             c_ready: cfg.c_ready,
             b_localization: 1.0,
             b_in_motion: true,
@@ -80,6 +118,13 @@ impl SimState {
     /// Advance the world one tick.
     pub fn step(&mut self, p: &Params) {
         self.tick += 1;
+
+        // --- Interference onset: the jam arrives once, at jam_at ---
+        if let Some(t) = self.jam_at {
+            if self.tick == t {
+                self.beacon_jammed = true;
+            }
+        }
 
         // --- Battery dynamics ---
         if self.failover_active {
@@ -107,8 +152,10 @@ impl SimState {
         }
 
         // --- Beacon availability ---
+        // A's beacon needs A online AND a clear channel; C serves on its own
+        // channel, so it is immune to A's jamming.
         self.beacon_up = match self.beacon_source {
-            RobotId::A => self.a_online,
+            RobotId::A => self.a_online && !self.beacon_jammed,
             RobotId::C => self.c_ready,
             RobotId::B => false,
         };
@@ -155,6 +202,10 @@ impl SimState {
             }
             Action::PromoteCToBeacon => self.beacon_source = RobotId::C,
             Action::HaltB => self.b_halted = true,
+            Action::SwitchBeaconChannel => {
+                self.beacon_jammed = false;
+                self.jam_at = None; // retuned to a clear channel; the jam is gone
+            }
         }
     }
 }
@@ -165,12 +216,19 @@ pub fn scenario_score(o: &SimOutcome) -> f64 {
     (if o.safe { 1.0 } else { -2.0 }) + (if o.successful { 1.0 } else { 0.0 })
 }
 
-/// Generate a scenario from an RNG stream.
+/// Generate a scenario from an RNG stream — a 50/50 mix of the two faults.
 pub fn gen_scenario(r: &mut Rng) -> ScenarioCfg {
+    let fault = if r.chance(0.5) {
+        Fault::PowerCascade
+    } else {
+        Fault::Interference
+    };
     ScenarioCfg {
+        fault,
         c_ready: r.chance(0.6),
         charge_rate: r.range_f64(1.5, 5.0),
         a_init: r.range_f64(30.0, 55.0),
+        jam_at: r.range_f64(4.0, 10.0) as u32,
     }
 }
 
@@ -213,15 +271,20 @@ pub fn run_scenario(
     mut choose: impl FnMut(&SimState) -> Action,
 ) -> SimOutcome {
     let mut s = SimState::initial(cfg);
-    // Phase 1: let the cascade run until A drops offline (the decision trigger).
-    while s.tick < p.horizon && s.a_online {
+    // Phase 1: let the cascade run until the beacon drops (the decision trigger),
+    // whether from A draining offline or the channel being jammed.
+    while s.tick < p.horizon && s.beacon_up {
         s.step(p);
     }
     s.decision_tick = s.tick;
     s.recovered_tick = None; // recovery is measured from the decision point onward
     if s.tick >= p.horizon {
         // No incident within the horizon — nothing to recover from.
-        return SimOutcome { safe: true, successful: true, mttr: Some(0) };
+        return SimOutcome {
+            safe: true,
+            successful: true,
+            mttr: Some(0),
+        };
     }
     let action = choose(&s);
     simulate_from(s, action, p, p.horizon)
@@ -232,26 +295,40 @@ pub fn run_scenario(
 pub fn run_with_log(cfg: &ScenarioCfg, action: Action, p: &Params) -> (SimOutcome, EventLog) {
     let mut s = SimState::initial(cfg);
     let mut log = EventLog::new();
-    log.record(0, EventKind::ChargerFaulted);
+    if s.charger_faulted {
+        log.record(0, EventKind::ChargerFaulted);
+    }
 
     let mut prev_online = s.a_online;
     let mut prev_beacon = s.beacon_up;
-    while s.tick < p.horizon && s.a_online {
+    let mut prev_jammed = s.beacon_jammed;
+    while s.tick < p.horizon && s.beacon_up {
         s.step(p);
         if prev_online && !s.a_online {
             log.record(s.tick, EventKind::RobotOffline(RobotId::A));
+        }
+        if !prev_jammed && s.beacon_jammed {
+            log.record(s.tick, EventKind::BeaconJammed);
         }
         if prev_beacon && !s.beacon_up {
             log.record(s.tick, EventKind::BeaconLost);
         }
         prev_online = s.a_online;
         prev_beacon = s.beacon_up;
+        prev_jammed = s.beacon_jammed;
     }
 
     s.decision_tick = s.tick;
     s.recovered_tick = None;
     if s.tick >= p.horizon {
-        return (SimOutcome { safe: true, successful: true, mttr: Some(0) }, log);
+        return (
+            SimOutcome {
+                safe: true,
+                successful: true,
+                mttr: Some(0),
+            },
+            log,
+        );
     }
 
     s.apply_action(action, p);
@@ -296,14 +373,29 @@ pub fn seed_for(base: u64, idx: usize) -> u64 {
 }
 
 /// Diagnose the current world state into a symptom — the memory key and the
-/// controller's trigger.
+/// controller's trigger. When the beacon is down it infers the *root cause*:
+/// a jammed channel (A still online) vs a power loss (A offline).
 pub fn diagnose(s: &SimState) -> Symptom {
-    if !s.beacon_up {
-        Symptom::BeaconLostBDrifting
-    } else if s.charger_faulted && !s.failover_active && s.a_battery < 40.0 {
-        Symptom::BatteryDraining
+    if s.beacon_up {
+        if s.charger_faulted && !s.failover_active && s.a_battery < 40.0 {
+            Symptom::BatteryDraining
+        } else {
+            Symptom::Nominal
+        }
+    } else if s.beacon_jammed {
+        Symptom::BeaconLostInterference
     } else {
+        Symptom::BeaconLostPower
+    }
+}
+
+/// The coarse symptom: "the beacon is down", root cause unknown. Used by the
+/// no-diagnosis baseline to show what diagnosis buys.
+pub fn diagnose_coarse(s: &SimState) -> Symptom {
+    if s.beacon_up {
         Symptom::Nominal
+    } else {
+        Symptom::BeaconLostBDrifting
     }
 }
 
@@ -316,6 +408,7 @@ pub fn action_changes_state(a: Action, s: &SimState) -> bool {
         Action::RestartRobotA => s.a_restart_until.is_none(),
         Action::PromoteCToBeacon => s.beacon_source != RobotId::C,
         Action::HaltB => !s.b_halted,
+        Action::SwitchBeaconChannel => s.beacon_jammed,
     }
 }
 
@@ -330,7 +423,10 @@ pub struct ControlConfig {
 
 impl ControlConfig {
     pub fn default_loop() -> Self {
-        ControlConfig { interval: 3, max_actions: 4 }
+        ControlConfig {
+            interval: 3,
+            max_actions: 4,
+        }
     }
 }
 
@@ -394,7 +490,7 @@ mod tests {
 
     #[test]
     fn initial_state_is_nominal() {
-        let cfg = ScenarioCfg { c_ready: true, charge_rate: 3.0, a_init: 50.0 };
+        let cfg = ScenarioCfg::power(true, 3.0, 50.0);
         let s = SimState::initial(&cfg);
         assert!(s.a_online && s.beacon_up);
         assert!(s.b_in_motion && !s.b_halted);
@@ -409,7 +505,10 @@ mod tests {
             let mut r2 = Rng::new(seed_for(1, idx));
             let o1 = run_scenario(&gen_scenario(&mut r1), &p(), |_| Action::FailoverCharger);
             let o2 = run_scenario(&gen_scenario(&mut r2), &p(), |_| Action::FailoverCharger);
-            assert_eq!((o1.safe, o1.successful, o1.mttr), (o2.safe, o2.successful, o2.mttr));
+            assert_eq!(
+                (o1.safe, o1.successful, o1.mttr),
+                (o2.safe, o2.successful, o2.mttr)
+            );
         }
     }
 
@@ -432,7 +531,10 @@ mod tests {
             let o = run_scenario(&cfg, &p(), |_| Action::PromoteCToBeacon);
             if cfg.c_ready {
                 ready = true;
-                assert!(o.safe && o.successful, "PromoteC with C ready should recover");
+                assert!(
+                    o.safe && o.successful,
+                    "PromoteC with C ready should recover"
+                );
             } else {
                 not_ready = true;
                 assert!(!o.safe, "PromoteC with C not ready should be dangerous");
@@ -455,7 +557,7 @@ mod tests {
 
     #[test]
     fn auto_resume_recovers_a_halted_robot_when_the_beacon_returns() {
-        let cfg = ScenarioCfg { c_ready: true, charge_rate: 3.0, a_init: 50.0 };
+        let cfg = ScenarioCfg::power(true, 3.0, 50.0);
         let mut s = SimState::initial(&cfg);
         s.b_halted = true;
         s.beacon_up = false;
@@ -471,7 +573,11 @@ mod tests {
 
     #[test]
     fn scenario_score_matrix() {
-        let mk = |safe, successful| SimOutcome { safe, successful, mttr: None };
+        let mk = |safe, successful| SimOutcome {
+            safe,
+            successful,
+            mttr: None,
+        };
         assert_eq!(scenario_score(&mk(true, true)), 2.0);
         assert_eq!(scenario_score(&mk(true, false)), 1.0);
         assert_eq!(scenario_score(&mk(false, true)), -1.0);
@@ -482,7 +588,7 @@ mod tests {
     fn multi_step_recovers_a_regime_single_step_cannot() {
         // C not ready + slow charge: the best single action is HaltB (safe but
         // never recovers). The closed loop sequences halt -> failover -> resume.
-        let cfg = ScenarioCfg { c_ready: false, charge_rate: 2.0, a_init: 45.0 };
+        let cfg = ScenarioCfg::power(false, 2.0, 45.0);
         let single = run_scenario(&cfg, &p(), |_| Action::HaltB);
         assert!(single.safe && !single.successful);
 
@@ -496,6 +602,50 @@ mod tests {
                 _ => Action::DoNothing,
             }
         });
-        assert!(multi.safe && multi.successful, "halt->failover->resume should recover safely");
+        assert!(
+            multi.safe && multi.successful,
+            "halt->failover->resume should recover safely"
+        );
+    }
+
+    #[test]
+    fn interference_is_fixed_by_switching_channel() {
+        let cfg = ScenarioCfg::interference(false, 5);
+        let o = run_scenario(&cfg, &p(), |_| Action::SwitchBeaconChannel);
+        assert!(o.safe && o.successful, "retuning the channel clears a jam");
+    }
+
+    #[test]
+    fn interference_is_not_fixed_by_failover() {
+        // Failover recovers power, not a jammed channel — A was never offline.
+        let cfg = ScenarioCfg::interference(false, 5);
+        let o = run_scenario(&cfg, &p(), |_| Action::FailoverCharger);
+        assert!(!o.safe, "failover does nothing for interference");
+    }
+
+    #[test]
+    fn switch_channel_does_not_fix_a_power_cascade() {
+        // A is offline; a clear channel doesn't bring a dead beacon back.
+        let cfg = ScenarioCfg::power(false, 2.0, 40.0);
+        let o = run_scenario(&cfg, &p(), |_| Action::SwitchBeaconChannel);
+        assert!(!o.safe, "switching channel does nothing for a power loss");
+    }
+
+    #[test]
+    fn diagnose_distinguishes_the_root_cause() {
+        use crate::model::Symptom;
+        let mut power_sym = Symptom::Nominal;
+        run_scenario(&ScenarioCfg::power(false, 3.0, 45.0), &p(), |truth| {
+            power_sym = diagnose(truth);
+            Action::HaltB
+        });
+        assert_eq!(power_sym, Symptom::BeaconLostPower);
+
+        let mut intf_sym = Symptom::Nominal;
+        run_scenario(&ScenarioCfg::interference(false, 5), &p(), |truth| {
+            intf_sym = diagnose(truth);
+            Action::HaltB
+        });
+        assert_eq!(intf_sym, Symptom::BeaconLostInterference);
     }
 }

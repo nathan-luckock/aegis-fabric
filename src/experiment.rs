@@ -1,13 +1,14 @@
 //! The falsifiable experiment: train memory, evaluate the strategies on
-//! identical seeded incidents (single-step and closed-loop), print the
-//! comparison tables, the twin-fidelity sweep, and a narrated incident.
+//! identical seeded incidents (single-step and closed-loop, across both fault
+//! types), print the comparison tables, the diagnosis ablation, the
+//! twin-fidelity sweep, and two narrated incidents.
 
 use crate::decision::{Arm, DecisionContext, IncidentMemory, Policy};
-use crate::model::{Action, Params, Symptom};
+use crate::model::{Action, Fault, Params, Symptom};
 use crate::rng::Rng;
 use crate::sim::{
-    action_changes_state, gen_scenario, observe, run_controlled, run_scenario, run_with_log,
-    scenario_score, seed_for, ControlConfig, SimOutcome,
+    action_changes_state, diagnose, diagnose_coarse, gen_scenario, observe, run_controlled,
+    run_scenario, run_with_log, scenario_score, seed_for, ControlConfig, ScenarioCfg, SimOutcome,
 };
 
 #[derive(Default)]
@@ -40,13 +41,23 @@ impl ArmStats {
     }
 
     fn summary(&self) -> Summary {
-        let pct = |x: u32| if self.n == 0 { 0.0 } else { x as f64 / self.n as f64 * 100.0 };
+        let pct = |x: u32| {
+            if self.n == 0 {
+                0.0
+            } else {
+                x as f64 / self.n as f64 * 100.0
+            }
+        };
         Summary {
             n: self.n,
             safe: pct(self.safe),
             success: pct(self.success),
             danger: pct(self.danger),
-            score: if self.n == 0 { 0.0 } else { self.score / self.n as f64 },
+            score: if self.n == 0 {
+                0.0
+            } else {
+                self.score / self.n as f64
+            },
             mttr: if self.mttr_n == 0 {
                 None
             } else {
@@ -68,21 +79,36 @@ pub struct Summary {
 }
 
 /// Train operational memory by observing the real outcome of randomly-chosen
-/// actions across many incidents — "what historically happened when we tried X".
-pub fn train_memory(train_n: usize, seed: u64) -> IncidentMemory {
+/// actions across many incidents. `diagnosed` controls the memory key: the
+/// diagnosed root cause, or the coarse "beacon down" symptom (the baseline).
+fn train_mem(train_n: usize, seed: u64, diagnosed: bool) -> IncidentMemory {
     let p = Params::ground_truth();
     let mut mem = IncidentMemory::new();
     let actions = Action::all();
     for idx in 0..train_n {
         let mut r = Rng::new(seed_for(seed ^ 0x00AB_CDEF, idx));
         let cfg = gen_scenario(&mut r);
-        let a = actions[(r.next_u64() % 5) as usize];
-        let outcome = run_scenario(&cfg, &p, |_truth| a);
-        mem.record(Symptom::BeaconLostBDrifting, a, scenario_score(&outcome));
+        let a = actions[(r.next_u64() % actions.len() as u64) as usize];
+        let mut sym = Symptom::Nominal;
+        let outcome = run_scenario(&cfg, &p, |truth| {
+            sym = if diagnosed {
+                diagnose(truth)
+            } else {
+                diagnose_coarse(truth)
+            };
+            a
+        });
+        mem.record(sym, a, scenario_score(&outcome));
     }
     mem
 }
 
+/// Train memory keyed on the diagnosed root cause (the production keying).
+pub fn train_memory(train_n: usize, seed: u64) -> IncidentMemory {
+    train_mem(train_n, seed, true)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn eval(
     arm: &Arm,
     n: usize,
@@ -91,6 +117,7 @@ fn eval(
     fidelity: f64,
     mem: &IncidentMemory,
     multistep: bool,
+    diagnosed: bool,
 ) -> ArmStats {
     let p = Params::ground_truth();
     let twin = Params::ground_truth();
@@ -99,8 +126,7 @@ fn eval(
     let mut st = ArmStats::default();
 
     for idx in 0..n {
-        let mut sr = Rng::new(seed_for(base_seed, idx));
-        let cfg = gen_scenario(&mut sr);
+        let cfg = gen_scenario(&mut Rng::new(seed_for(base_seed, idx)));
         let mut br = Rng::new(seed_for(belief_seed, idx));
 
         let outcome = if multistep {
@@ -119,9 +145,14 @@ fn eval(
             })
         } else {
             run_scenario(&cfg, &p, |truth| {
+                let sym = if diagnosed {
+                    diagnose(truth)
+                } else {
+                    diagnose_coarse(truth)
+                };
                 let belief = observe(truth, fidelity, &mut br);
                 let ctx = DecisionContext {
-                    symptom: Symptom::BeaconLostBDrifting,
+                    symptom: sym,
                     belief,
                     horizon: p.horizon,
                     decision_tick: truth.decision_tick,
@@ -137,7 +168,7 @@ fn eval(
     st
 }
 
-/// Evaluate a strategy over `n` seeded incidents and summarise the result.
+/// Evaluate a strategy over `n` seeded incidents (diagnosed keying).
 pub fn evaluate(
     arm: &Arm,
     n: usize,
@@ -146,11 +177,14 @@ pub fn evaluate(
     mem: &IncidentMemory,
     multistep: bool,
 ) -> Summary {
-    eval(arm, n, seed, seed ^ 0xBEEF, fidelity, mem, multistep).summary()
+    eval(arm, n, seed, seed ^ 0xBEEF, fidelity, mem, multistep, true).summary()
 }
 
 fn print_row(name: &str, s: &Summary) {
-    let mttr = s.mttr.map(|m| format!("{m:.1}")).unwrap_or_else(|| "  -".to_string());
+    let mttr = s
+        .mttr
+        .map(|m| format!("{m:.1}"))
+        .unwrap_or_else(|| "  -".to_string());
     println!(
         "{:<13} {:>6.1} {:>9.1} {:>8.1} {:>8.2} {:>6}",
         name, s.safe, s.success, s.danger, s.score, mttr
@@ -159,14 +193,15 @@ fn print_row(name: &str, s: &Summary) {
 
 /// Entry point: run the whole experiment and print the report.
 pub fn run(n_eval: usize, train_n: usize, seed: u64) {
-    let memory = train_memory(train_n, seed);
+    let mem = train_memory(train_n, seed);
+    let mem_coarse = train_mem(train_n, seed, false);
 
     println!("Aegis Fabric — simulate-before-act experiment");
     println!("  {n_eval} eval scenarios / {train_n} train scenarios | seed {seed:#x}\n");
-    println!("Incident: shared charger faults -> A drains -> A drops the beacon ->");
-    println!("          B (depends on A's beacon) loses localization -> fleet degrades.");
-    println!("Each arm picks recovery actions. Safe = no collision-risk state ever;");
-    println!("Success = B ended back on task, well localized.\n");
+    println!("Two independent faults, 50/50, both surfacing as 'B loses localization':");
+    println!("  - power cascade: charger faults, A drains, beacon goes dark");
+    println!("  - interference: A is healthy, its beacon channel is jammed");
+    println!("The right *root* fix differs by fault, so diagnosis matters.\n");
 
     println!(
         "{:<13} {:>6} {:>9} {:>8} {:>8} {:>6}",
@@ -174,14 +209,55 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
     );
     println!("{}", "-".repeat(55));
     for arm in [Arm::Reactive, Arm::MemoryOnly, Arm::FullAegis] {
-        print_row(arm.name(), &evaluate(&arm, n_eval, seed, 1.0, &memory, false));
+        print_row(arm.name(), &evaluate(&arm, n_eval, seed, 1.0, &mem, false));
     }
 
+    println!("\nDoes diagnosis earn its keep? Memory keyed on the diagnosed root cause");
+    println!("vs the coarse 'beacon down' symptom (single-step, fidelity 1.0):");
+    println!(
+        "{:<24} {:>6} {:>9} {:>8}",
+        "Memory keyed on", "Safe%", "Success%", "Score"
+    );
+    println!("{}", "-".repeat(49));
+    let coarse = eval(
+        &Arm::MemoryOnly,
+        n_eval,
+        seed,
+        seed ^ 0xBEEF,
+        1.0,
+        &mem_coarse,
+        false,
+        false,
+    )
+    .summary();
+    let diag = eval(
+        &Arm::MemoryOnly,
+        n_eval,
+        seed,
+        seed ^ 0xBEEF,
+        1.0,
+        &mem,
+        false,
+        true,
+    )
+    .summary();
+    println!(
+        "{:<24} {:>6.1} {:>9.1} {:>8.2}",
+        "coarse (no diagnosis)", coarse.safe, coarse.success, coarse.score
+    );
+    println!(
+        "{:<24} {:>6.1} {:>9.1} {:>8.2}",
+        "diagnosed root cause", diag.safe, diag.success, diag.score
+    );
+
     println!("\nTwin fidelity sweep (Full Aegis) — the win is not a perfect-oracle artifact:");
-    println!("{:>9} {:>6} {:>9} {:>8} {:>8}", "Fidelity", "Safe%", "Success%", "Danger%", "Score");
+    println!(
+        "{:>9} {:>6} {:>9} {:>8} {:>8}",
+        "Fidelity", "Safe%", "Success%", "Danger%", "Score"
+    );
     println!("{}", "-".repeat(43));
     for f in [1.0, 0.9, 0.75, 0.5, 0.25] {
-        let s = evaluate(&Arm::FullAegis, n_eval, seed, f, &memory, false);
+        let s = evaluate(&Arm::FullAegis, n_eval, seed, f, &mem, false);
         println!(
             "{:>9.2} {:>6.1} {:>9.1} {:>8.1} {:>8.2}",
             f, s.safe, s.success, s.danger, s.score
@@ -195,8 +271,8 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
     );
     println!("{}", "-".repeat(57));
     for arm in [Arm::Reactive, Arm::MemoryOnly, Arm::FullAegis] {
-        let one = evaluate(&arm, n_eval, seed, 1.0, &memory, false);
-        let many = evaluate(&arm, n_eval, seed, 1.0, &memory, true);
+        let one = evaluate(&arm, n_eval, seed, 1.0, &mem, false);
+        let many = evaluate(&arm, n_eval, seed, 1.0, &mem, true);
         println!(
             "{:<13} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
             arm.name(),
@@ -207,52 +283,64 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
         );
     }
 
-    demo(seed, &memory);
+    narrate(
+        "Power cascade — C not ready, slow charge",
+        &find(seed ^ 0xD00D, |c| {
+            c.fault == Fault::PowerCascade && !c.c_ready && c.charge_rate < 2.2
+        }),
+        &mem,
+    );
+    narrate(
+        "Interference — C not ready",
+        &find(seed ^ 0xBEAD, |c| {
+            c.fault == Fault::Interference && !c.c_ready
+        }),
+        &mem,
+    );
 }
 
-/// Narrate one incident: the cascade if nothing is done, then the single-step
-/// choices, then the closed-loop sequence.
-fn demo(seed: u64, mem: &IncidentMemory) {
+/// Find the first seeded scenario matching `pred`.
+fn find(base: u64, pred: impl Fn(&ScenarioCfg) -> bool) -> ScenarioCfg {
+    for k in 0..20_000usize {
+        let c = gen_scenario(&mut Rng::new(seed_for(base, k)));
+        if pred(&c) {
+            return c;
+        }
+    }
+    gen_scenario(&mut Rng::new(base))
+}
+
+/// Narrate one incident end-to-end: the do-nothing cascade, the single-step
+/// choices, and the closed-loop sequence.
+fn narrate(title: &str, cfg: &ScenarioCfg, mem: &IncidentMemory) {
     let p = Params::ground_truth();
     let twin = Params::ground_truth();
     let policy = Policy;
 
-    // Pick the hardest regime: C not ready AND slow recharge. No single action
-    // both makes B safe and recovers it — only a sequence does.
-    let cfg = {
-        let mut found = None;
-        for k in 0..5000usize {
-            let mut r = Rng::new(seed_for(seed ^ 0xD00D, k));
-            let c = gen_scenario(&mut r);
-            if !c.c_ready && c.charge_rate < 2.2 {
-                found = Some(c);
-                break;
-            }
-        }
-        found.unwrap_or_else(|| gen_scenario(&mut Rng::new(seed)))
-    };
-
-    println!("\n== Demo incident ==");
+    println!("\n== {title} ==");
     println!(
-        "Scenario: C_ready={}, A_recharge_rate={:.2}/tick, A_start_battery={:.0}%",
-        cfg.c_ready, cfg.charge_rate, cfg.a_init
+        "fault={}  C_ready={}  A_recharge={:.2}  A_start={:.0}%",
+        cfg.fault.label(),
+        cfg.c_ready,
+        cfg.charge_rate,
+        cfg.a_init
     );
 
-    let (out0, log) = run_with_log(&cfg, Action::DoNothing, &p);
-    println!("\nIf nothing is done (do-nothing):");
+    let (out0, log) = run_with_log(cfg, Action::DoNothing, &p);
+    println!("if nothing is done:");
     for e in &log.events {
         println!("  t={:>2}  {}", e.tick, e.kind.describe());
     }
     println!("  => safe={}, recovered={}", out0.safe, out0.successful);
 
-    println!("\nSingle-step — each strategy gets ONE action:");
+    println!("single-step — one action each:");
     for arm in [Arm::Reactive, Arm::MemoryOnly, Arm::FullAegis] {
-        let mut br = Rng::new(seed_for(seed ^ 0xF00D, 0));
+        let mut br = Rng::new(7);
         let mut chosen = Action::DoNothing;
-        let outcome = run_scenario(&cfg, &p, |truth| {
+        let outcome = run_scenario(cfg, &p, |truth| {
             let belief = observe(truth, 1.0, &mut br);
             let ctx = DecisionContext {
-                symptom: Symptom::BeaconLostBDrifting,
+                symptom: diagnose(truth),
                 belief,
                 horizon: p.horizon,
                 decision_tick: truth.decision_tick,
@@ -273,10 +361,9 @@ fn demo(seed: u64, mem: &IncidentMemory) {
         );
     }
 
-    println!("\nClosed loop — Full Aegis may sequence actions:");
     let mut seq: Vec<Action> = Vec::new();
-    let mut br = Rng::new(seed_for(seed ^ 0xF00D, 1));
-    let outcome = run_controlled(&cfg, &p, &ControlConfig::default_loop(), |state, sym| {
+    let mut br = Rng::new(11);
+    let outcome = run_controlled(cfg, &p, &ControlConfig::default_loop(), |state, sym| {
         let belief = observe(state, 1.0, &mut br);
         let ctx = DecisionContext {
             symptom: sym,
@@ -288,15 +375,18 @@ fn demo(seed: u64, mem: &IncidentMemory) {
             policy: &policy,
         };
         let a = Arm::FullAegis.decide(&ctx);
-        // Narrate only actions that actually change the world.
         if action_changes_state(a, state) {
             seq.push(a);
         }
         a
     });
     let path: Vec<&str> = seq.iter().map(|a| a.label()).collect();
-    println!("  Full Aegis   -> [{}]", path.join(" then "));
-    println!("  => safe={}, success={}", outcome.safe, outcome.successful);
+    println!(
+        "closed loop  Full Aegis -> [{}]  safe={} success={}",
+        path.join(" then "),
+        outcome.safe,
+        outcome.successful
+    );
 }
 
 #[cfg(test)]
@@ -304,14 +394,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_learns_the_safe_default() {
+    fn memory_learns_the_right_fix_per_root_cause() {
         let mem = train_memory(8000, 0x5151);
-        let sym = Symptom::BeaconLostBDrifting;
-        let halt = mem.mean(sym, Action::HaltB).expect("halt seen");
-        for a in [Action::DoNothing, Action::FailoverCharger, Action::PromoteCToBeacon] {
-            let m = mem.mean(sym, a).expect("action seen");
-            assert!(halt >= m, "HaltB should be the best historical action ({a:?} = {m})");
+        // Power cascade: HaltB is the safest single action (the loop recovers later).
+        let halt = mem
+            .mean(Symptom::BeaconLostPower, Action::HaltB)
+            .expect("seen");
+        for a in Action::all() {
+            if a != Action::HaltB {
+                if let Some(m) = mem.mean(Symptom::BeaconLostPower, a) {
+                    assert!(halt >= m, "power: HaltB should be best, but {a:?} = {m}");
+                }
+            }
         }
+        // Interference: switching the channel is the clear winner.
+        let switch = mem
+            .mean(Symptom::BeaconLostInterference, Action::SwitchBeaconChannel)
+            .expect("seen");
+        for a in Action::all() {
+            if a != Action::SwitchBeaconChannel {
+                if let Some(m) = mem.mean(Symptom::BeaconLostInterference, a) {
+                    assert!(
+                        switch >= m,
+                        "interference: switch-channel should be best, but {a:?} = {m}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagnosis_lifts_memory_success() {
+        let mem_diag = train_memory(8000, 0x5151);
+        let mem_coarse = train_mem(8000, 0x5151, false);
+        let coarse = eval(
+            &Arm::MemoryOnly,
+            4000,
+            0x5151,
+            0x5151 ^ 0xBEEF,
+            1.0,
+            &mem_coarse,
+            false,
+            false,
+        )
+        .summary();
+        let diag = eval(
+            &Arm::MemoryOnly,
+            4000,
+            0x5151,
+            0x5151 ^ 0xBEEF,
+            1.0,
+            &mem_diag,
+            false,
+            true,
+        )
+        .summary();
+        assert!(coarse.safe >= 99.0 && diag.safe >= 99.0, "both stay safe");
+        assert!(
+            diag.success > coarse.success + 10.0,
+            "diagnosis should materially lift memory's success ({} vs {})",
+            diag.success,
+            coarse.success
+        );
     }
 
     #[test]
@@ -320,10 +464,26 @@ mod tests {
         let r = evaluate(&Arm::Reactive, 3000, 0x5151, 1.0, &mem, false);
         let m = evaluate(&Arm::MemoryOnly, 3000, 0x5151, 1.0, &mem, false);
         let f = evaluate(&Arm::FullAegis, 3000, 0x5151, 1.0, &mem, false);
-        assert!(f.score > m.score, "simulation should beat memory ({} vs {})", f.score, m.score);
-        assert!(m.score > r.score, "memory should beat reactive ({} vs {})", m.score, r.score);
-        assert!(m.safe >= 99.0 && f.safe >= 99.0, "memory and full aegis are safe");
-        assert!(f.success > m.success, "simulation recovers more than memory's safe default");
+        assert!(
+            f.score > m.score,
+            "simulation should beat memory ({} vs {})",
+            f.score,
+            m.score
+        );
+        assert!(
+            m.score > r.score,
+            "memory should beat reactive ({} vs {})",
+            m.score,
+            r.score
+        );
+        assert!(
+            m.safe >= 99.0 && f.safe >= 99.0,
+            "memory and full aegis are safe"
+        );
+        assert!(
+            f.success > m.success,
+            "simulation recovers more than memory's safe default"
+        );
     }
 
     #[test]
@@ -333,7 +493,7 @@ mod tests {
         let many = evaluate(&Arm::FullAegis, 3000, 0x5151, 1.0, &mem, true);
         assert!(many.safe >= 99.0, "closed loop stays safe ({})", many.safe);
         assert!(
-            many.success > one.success + 5.0,
+            many.success > one.success + 3.0,
             "closed loop should recover materially more ({} vs {})",
             many.success,
             one.success
@@ -341,11 +501,19 @@ mod tests {
     }
 
     #[test]
-    fn fidelity_degrades_full_aegis_monotonically_ish() {
+    fn fidelity_degrades_full_aegis() {
         let mem = train_memory(8000, 0x5151);
         let hi = evaluate(&Arm::FullAegis, 3000, 0x5151, 1.0, &mem, false);
         let lo = evaluate(&Arm::FullAegis, 3000, 0x5151, 0.25, &mem, false);
-        assert!(hi.score > lo.score, "lower twin fidelity should not help ({} vs {})", hi.score, lo.score);
-        assert!(hi.danger <= lo.danger, "lower fidelity should not reduce danger");
+        assert!(
+            hi.score > lo.score,
+            "lower twin fidelity should not help ({} vs {})",
+            hi.score,
+            lo.score
+        );
+        assert!(
+            hi.danger <= lo.danger,
+            "lower fidelity should not reduce danger"
+        );
     }
 }

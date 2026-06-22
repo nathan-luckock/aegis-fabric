@@ -14,6 +14,8 @@ pub enum EventKind {
     RobotOnline(RobotId),
     BeaconLost,
     BeaconRestored,
+    BeaconJammed,
+    ChannelSwitched,
     LocalizationDegraded(f64),
     DangerousState(RobotId),
     ActionTaken(Action),
@@ -29,8 +31,12 @@ impl EventKind {
             EventKind::RobotOnline(r) => format!("robot {r} back online"),
             EventKind::BeaconLost => "beacon network lost".to_string(),
             EventKind::BeaconRestored => "beacon network restored".to_string(),
+            EventKind::BeaconJammed => "beacon channel jammed (interference)".to_string(),
+            EventKind::ChannelSwitched => "beacon retuned to a clear channel".to_string(),
             EventKind::LocalizationDegraded(q) => format!("B localization degraded ({q:.2})"),
-            EventKind::DangerousState(r) => format!("DANGER: robot {r} moving without localization"),
+            EventKind::DangerousState(r) => {
+                format!("DANGER: robot {r} moving without localization")
+            }
             EventKind::ActionTaken(a) => format!("runtime action: {a}"),
             EventKind::FleetRecovered => "fleet recovered".to_string(),
         }
@@ -91,6 +97,8 @@ mod tests {
             EventKind::RobotOnline(RobotId::A),
             EventKind::BeaconLost,
             EventKind::BeaconRestored,
+            EventKind::BeaconJammed,
+            EventKind::ChannelSwitched,
             EventKind::LocalizationDegraded(0.3),
             EventKind::DangerousState(RobotId::B),
             EventKind::ActionTaken(Action::HaltB),

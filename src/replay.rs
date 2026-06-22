@@ -8,7 +8,9 @@
 //! never disagree with the run it reconstructs.
 
 use crate::model::{Action, Params};
-use crate::sim::{action_changes_state, diagnose, ControlConfig, ScenarioCfg, SimOutcome, SimState};
+use crate::sim::{
+    action_changes_state, diagnose, ControlConfig, ScenarioCfg, SimOutcome, SimState,
+};
 
 /// One tick of an incident: the world state after the tick, plus anything that
 /// changed (events) and any action the controller applied entering it.
@@ -62,6 +64,7 @@ pub fn trace(
 
     let (mut prev_online, mut prev_beacon) = (s.a_online, s.beacon_up);
     let (mut prev_danger, mut prev_halted) = (s.dangerous_seen, s.b_halted);
+    let mut prev_jammed = s.beacon_jammed;
     let mut prev_recovered = s.recovered_tick.is_some();
 
     while s.tick < p.horizon {
@@ -98,6 +101,12 @@ pub fn trace(
         if !prev_online && s.a_online {
             events.push("robot A back online".to_string());
         }
+        if !prev_jammed && s.beacon_jammed {
+            events.push("beacon jammed (interference)".to_string());
+        }
+        if prev_jammed && !s.beacon_jammed {
+            events.push("beacon channel cleared".to_string());
+        }
         if prev_beacon && !s.beacon_up {
             events.push("beacon lost".to_string());
         }
@@ -133,6 +142,7 @@ pub fn trace(
 
         prev_online = s.a_online;
         prev_beacon = s.beacon_up;
+        prev_jammed = s.beacon_jammed;
         prev_danger = s.dangerous_seen;
         prev_halted = s.b_halted;
         prev_recovered = recovered_now;
@@ -182,8 +192,11 @@ fn b_state(f: &Frame) -> &'static str {
 /// story, not the noise.
 pub fn render(trace: &Trace, keyframes_only: bool) {
     println!(
-        "scenario: C_ready={}  A_recharge={:.2}/tick  A_start={:.0}%",
-        trace.cfg.c_ready, trace.cfg.charge_rate, trace.cfg.a_init
+        "scenario: fault={}  C_ready={}  A_recharge={:.2}/tick  A_start={:.0}%",
+        trace.cfg.fault.label(),
+        trace.cfg.c_ready,
+        trace.cfg.charge_rate,
+        trace.cfg.a_init
     );
     if let Some(t) = trace.decision_tick {
         println!("beacon first lost at t={t}");
@@ -271,6 +284,9 @@ mod tests {
         let t = trace(&cfg, &p, &ctl, |_s, _sym| Action::DoNothing);
         let keys = t.frames.iter().filter(|f| f.is_keyframe()).count();
         assert!(keys >= 1 && keys <= t.frames.len());
-        assert!(t.frames.iter().any(|f| f.events.iter().any(|e| e.contains("beacon lost"))));
+        assert!(t
+            .frames
+            .iter()
+            .any(|f| f.events.iter().any(|e| e.contains("beacon lost"))));
     }
 }

@@ -64,7 +64,7 @@ is real and bounded. **Do not collapse the twin into the world.**
 | `rng.rs` | deterministic SplitMix64 PRNG; the basis of replayability |
 | `model.rs` | domain types: `RobotId`, `Action`, `Symptom`, world `Params` |
 | `event.rs` | append-only `EventLog` — the source-of-truth timeline |
-| `sim.rs` | ground-truth world + shared tick engine, scenario gen, the twin (`observe`), `simulate_from`, single-step `run_scenario`, closed-loop `run_controlled`, `diagnose` |
+| `sim.rs` | ground-truth world (two faults: power cascade + beacon jam) + shared tick engine, scenario gen, the twin (`observe`), `simulate_from`, single-step `run_scenario`, closed-loop `run_controlled`, root-cause `diagnose` / `diagnose_coarse` |
 | `decision.rs` | `IncidentMemory`, `Policy` gate, the three `Arm`s and their `decide()` |
 | `replay.rs` | deterministic replay → tick-by-tick forensic `Trace`; `src/bin/replay.rs` renders it as a timeline |
 | `experiment.rs` | trains memory, evaluates arms (single + multi-step) on identical seeds, prints tables + fidelity sweep + narrated incident; `pub evaluate`/`train_memory`/`Summary` for tests |
@@ -82,8 +82,8 @@ a strong reason; it makes the build instant and every run deterministic.
 cargo run --release              # full report: tables + fidelity sweep + demo
 cargo run --release -- 20000     # n_eval = 20000 (tighter estimates)
 cargo run --release -- 4000 8000 # n_eval, n_train explicit
-cargo test --release             # 37 tests (unit + seeded property/oracle sweeps)
-cargo run --release --bin replay -- 3 full       # forensic timeline of incident #3
+cargo test --release             # 42 tests (unit + seeded property/oracle sweeps)
+cargo run --release --bin replay -- 3 full       # forensic timeline of incident #3 (interference)
 cargo run --release --bin replay -- 3 reactive --all  # any seed/strategy, every tick
 cargo fmt && cargo clippy --all-targets   # before committing (CI not yet wired)
 ```
@@ -98,13 +98,15 @@ collision-risk state, `success` = B back on task and well-localized.
 
 - ✅ MVP loop + closed-loop controller; 3-arm experiment proves the thesis with a
   clean fidelity sweep. Multi-step Full Aegis: 100% safe / 100% success.
+- ✅ Two faults (power cascade + beacon jam) with *different* root fixes; `diagnose`
+  distinguishes them and lifts memory success 0→49% (the diagnosis ablation).
 - ✅ Deterministic replay/forensics (`replay.rs` + `bin/replay.rs`): tick-by-tick timeline.
-- ✅ 37 tests (unit + seeded property/oracle sweeps), clippy-clean, no-unsafe.
-- 🟡 Diagnosis is coarse (near-one symptom); twin imperfection is belief-noise only.
+- ✅ 42 tests (unit + seeded property/oracle sweeps), clippy-clean, no-unsafe.
+- 🟡 Diagnosis reads a clean flag; twin imperfection is belief-noise only.
 - ⏸ Real twin calibration, noisy causal inference, real hardware — the frontier.
 
 ## Next thresholds (see STATUS for the full list)
 
-1. Richer failure space + a real diagnosis module — **recommended next**.
-2. Twin *physics* miscalibration (a second fidelity axis).
+1. Twin *physics* miscalibration (a second fidelity axis) — **recommended next**.
+2. A third fault with overlapping symptoms (diagnosis under ambiguity).
 3. CI (fmt + clippy + test workflow).

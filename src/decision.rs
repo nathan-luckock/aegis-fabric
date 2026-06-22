@@ -26,7 +26,9 @@ pub struct IncidentMemory {
 
 impl IncidentMemory {
     pub fn new() -> Self {
-        IncidentMemory { table: HashMap::new() }
+        IncidentMemory {
+            table: HashMap::new(),
+        }
     }
 
     pub fn record(&mut self, s: Symptom, a: Action, score: f64) {
@@ -182,12 +184,18 @@ mod tests {
 
     #[test]
     fn policy_forbids_restart_while_b_moves() {
-        let cfg = ScenarioCfg { c_ready: true, charge_rate: 3.0, a_init: 50.0 };
+        let cfg = ScenarioCfg::power(true, 3.0, 50.0);
         let mut s = SimState::initial(&cfg);
         let pol = Policy;
-        assert!(!pol.allows(Action::RestartRobotA, &s), "B is moving -> restart forbidden");
+        assert!(
+            !pol.allows(Action::RestartRobotA, &s),
+            "B is moving -> restart forbidden"
+        );
         s.b_halted = true;
-        assert!(pol.allows(Action::RestartRobotA, &s), "B halted -> restart allowed");
+        assert!(
+            pol.allows(Action::RestartRobotA, &s),
+            "B halted -> restart allowed"
+        );
         assert!(pol.allows(Action::HaltB, &s));
     }
 
@@ -198,7 +206,7 @@ mod tests {
         m.record(sym, Action::RestartRobotA, 5.0); // best mean, but forbidden
         m.record(sym, Action::HaltB, 1.0);
         m.record(sym, Action::DoNothing, -2.0);
-        let cfg = ScenarioCfg { c_ready: false, charge_rate: 2.0, a_init: 40.0 };
+        let cfg = ScenarioCfg::power(false, 2.0, 40.0);
         let belief = SimState::initial(&cfg); // B moving -> restart forbidden
         let pol = Policy;
         let p = Params::ground_truth();
@@ -222,7 +230,11 @@ mod tests {
                 captured = a;
                 a
             });
-            assert_ne!(captured, Action::RestartRobotA, "B moves at decision -> never restart");
+            assert_ne!(
+                captured,
+                Action::RestartRobotA,
+                "B moves at decision -> never restart"
+            );
         }
     }
 
@@ -239,7 +251,10 @@ mod tests {
                 let belief = observe(truth, 1.0, &mut br);
                 Arm::FullAegis.decide(&ctx_for(belief, &mem, &pol, &p))
             });
-            assert!(o.safe, "a faithful twin must yield a safe choice (idx {idx})");
+            assert!(
+                o.safe,
+                "a faithful twin must yield a safe choice (idx {idx})"
+            );
         }
     }
 

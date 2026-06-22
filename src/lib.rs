@@ -11,10 +11,10 @@
 //! so a Full-Aegis win is a real result, not a perfect-oracle artifact.
 #![allow(dead_code)]
 
-pub mod rng;
-pub mod model;
-pub mod event;
-pub mod sim;
 pub mod decision;
-pub mod replay;
+pub mod event;
 pub mod experiment;
+pub mod model;
+pub mod replay;
+pub mod rng;
+pub mod sim;
