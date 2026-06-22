@@ -29,6 +29,12 @@ Full thesis and the seven laws: [docs/scope.md](docs/scope.md).
    `nathan-luckock`. The active `gh` token *is* `nathan-luckock` (ADMIN), so push
    over `https://github.com/nathan-luckock/aegis-fabric.git` with the gh
    credential helper (`gh auth setup-git`).
+   - **If a push 403s as `NathanLuckock`:** the active gh account flipped. Run
+     `gh auth switch -h github.com -u Nathan7108` (that account's token resolves
+     to `nathan-luckock`) and retry. Confirm with `gh api user --jq .login`.
+   - Git Credential Manager (`manager`) can cache the wrong credential. Bypass it
+     with an inline token helper:
+     `git -c credential.helper= -c credential.helper='!f(){ echo username=x-access-token; echo password=$(gh auth token); }; f' push`.
 3. **Keep [docs/STATUS.md](docs/STATUS.md) current every session.** Update the
    component table and the result block as things land. A component is only ✅
    when its behaviour is actually checked, not merely compiled.
