@@ -2,61 +2,61 @@
 
 # Aegis Fabric
 
-### For fleets that must recover before anyone arrives.
+**operational memory for autonomous fleets**
 
-Operational memory for autonomous fleets. When a failure cascades through a robot fleet, Aegis Fabric remembers it, **simulates every candidate fix against a calibrated twin before touching the real world**, and applies the safest one — then keeps the lesson. The thesis is settled by one reproducible experiment: simulate-before-act reaches **100% safe recovery** where a reactive runbook reaches 61%.
+*A fleet hits a failure cascade at 3am with no one watching. Aegis Fabric remembers it, simulates every candidate fix against a calibrated twin before touching anything real, applies the safest one — and keeps the lesson for next time.*
 
 [![Status](https://img.shields.io/badge/status-MVP%20%C2%B7%20pre--alpha-orange?style=flat-square)](docs/STATUS.md)
-[![Safe recovery](https://img.shields.io/badge/safe%20recovery-100%25-3FB950?style=flat-square&logo=checkmarx&logoColor=white)](#the-result)
-[![vs reactive](https://img.shields.io/badge/vs%20reactive-%2B39pts%20safe-3FB950?style=flat-square)](#the-result)
+[![Safe recovery](https://img.shields.io/badge/safe%20recovery-100%25-3FB950?style=flat-square)](#the-numbers)
+[![Closed loop](https://img.shields.io/badge/closed%20loop-100%25%20recovered-3FB950?style=flat-square)](#closing-the-loop)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-8957e5?style=flat-square&logo=rust&logoColor=white)](#)
-[![Tests](https://img.shields.io/badge/tests-34%20passing-3FB950?style=flat-square&logo=rust&logoColor=white)](#proof-not-vibes)
+[![Tests](https://img.shields.io/badge/tests-37%20passing-3FB950?style=flat-square&logo=rust&logoColor=white)](#why-the-numbers-hold)
 [![Unsafe](https://img.shields.io/badge/unsafe-forbidden-CE422B?style=flat-square&logo=rust&logoColor=white)](#)
-[![Replay](https://img.shields.io/badge/every%20incident-replayable-2F81F7?style=flat-square)](#proof-not-vibes)
 [![License](https://img.shields.io/badge/license-MIT-2F81F7?style=flat-square)](#license)
-
-<br/>
-
-<img src="docs/img/result.svg" alt="Aegis Fabric experiment output: Full Aegis 100% safe / 81% success vs Reactive 61/61" width="820"/>
 
 </div>
 
-> Built for machines in the field: a warehouse fleet at 3am, an edge node behind a flaky link, a robot with no technician nearby. When one fault starts a cascade, Aegis Fabric reconstructs the cause, simulates the repairs, and picks the one that is both safe and effective — and proves, across 4,000 seeded incidents, that doing so beats reacting.
+```
+         shared charger faults
+                  │
+                  ▼
+   robot A drains ──▶ A drops the beacon ──▶ robot B loses localization ──▶ fleet degrades
+                                                       │
+                                          the runtime must pick a fix
+                                                       │
+        ┌──────────────────────────────────┬──────────────────────────────────┐
+        ▼                                   ▼                                   ▼
+     Reactive                          Memory-only                         Full Aegis
+   a fixed runbook                    the safe default                  simulate, then act
+   61% safe / 61% ok                 100% safe / 0% ok                 100% safe / 100% ok
+```
 
-<table align="center">
-<tr>
-<td align="center"><strong>100.0%</strong><br/>safe recovery</td>
-<td align="center"><strong>81.3%</strong><br/>mission success</td>
-<td align="center"><strong>0</strong><br/>dangerous actions</td>
-<td align="center"><strong>0</strong><br/>dependencies</td>
-<td align="center"><strong>1</strong><br/><code>u64</code> seed replays it</td>
-</tr>
-</table>
+> Three strategies face the same 4,000 seeded incidents. Reacting blindly is fast and often dangerous. Remembering the safe default is always safe but strands the robot. Only **simulating the fix first** is both safe and effective — and once it can sequence actions in a closed loop, it recovers *every* incident.
 
 ---
 
-## See it prove itself
-
-The image above is real output. `cargo run --release` re-runs 4,000 seeded incidents across all three strategies and prints the table live. Every scenario is deterministic — driven by one `u64` seed against the world — so the numbers regenerate exactly from this commit, and any incident replays bit-for-bit.
+## Run it
 
 ```bash
-cargo run --release            # 4000 eval / 8000 train scenarios
-cargo run --release -- 20000   # more scenarios, tighter estimates
+cargo run --release      # 4000 incidents × 3 strategies: the tables + a narrated incident
+cargo test --release     # 34 tests (unit + seeded property/oracle sweeps)
 ```
 
-## The result
+Every incident is a pure function of one `u64` seed against the world, so the output regenerates exactly from this commit and any failure replays bit-for-bit.
 
-The decision problem is a causal cascade, not three random failures: a shared charger faults → robot **A** drains → A drops the **beacon** → robot **B** (which localizes off A's beacon) starts drifting → the fleet degrades. At the moment B starts drifting, each strategy picks **one** recovery action.
+## The numbers
+
+The incident is a *causal cascade*, not three unrelated faults: a shared charger faults → robot **A** drains → A drops the **beacon** → robot **B** (which localizes off A's beacon) drifts → the fleet degrades. When B starts drifting, each strategy picks **one** recovery action:
 
 | Strategy | Safe% | Success% | Danger% | Score | What it does |
 |---|--:|--:|--:|--:|---|
-| Reactive | 60.8 | 60.8 | 39.2 | 0.43 | fixed runbook rule, no memory, no simulation |
+| Reactive | 60.8 | 60.8 | 39.2 | 0.43 | fixed runbook rule — no memory, no simulation |
 | Memory-only | 100.0 | 0.0 | 0.0 | 1.00 | best *historical* action — learns, can't adapt |
 | **Full Aegis** | **100.0** | **81.3** | **0.0** | **1.81** | simulate every allowed fix, pick the safest viable |
 
-Memory buys you *safety* — it learns the safe default (halt the robot). Simulation buys you safety **and** effectiveness: full mission recovery at zero dangerous actions, because it tests the context-specific fix before committing to it.
+Two deltas tell the whole story. Reactive → Memory-only is what *remembering* buys: safety. Memory-only → Full Aegis is what *simulating* buys on top: it keeps the safety and adds effectiveness, because it tests the context-specific fix before committing.
 
-And the win is **not** a perfect-oracle artifact. The twin runs on a deliberately-noisy *belief* of the world with a fidelity knob. As fidelity drops, simulate-before-act degrades gracefully — and below ~0.5 it stops being worth it. That threshold is the honest research frontier, not a number to hide.
+**The win is not a perfect-oracle artifact.** The twin runs on a deliberately-noisy *belief* of the world, governed by a fidelity knob. As fidelity drops, simulate-before-act degrades gracefully — and below ~0.5 it stops being worth it. That threshold is the honest research frontier, not a number to bury:
 
 | Twin fidelity | 1.00 | 0.90 | 0.75 | 0.50 | 0.25 |
 |---|--:|--:|--:|--:|--:|
@@ -65,82 +65,84 @@ And the win is **not** a perfect-oracle artifact. The twin runs on a deliberatel
 
 ### Closing the loop
 
-A single action can't always both make B safe *and* recover it — when C isn't
-ready and the charger recharges slowly, the only safe single action is to halt B
-and strand it. The **closed-loop controller** (act → verify → re-decide) sequences
-actions instead: halt B to make it safe, fail the charger over to recover A, and
-let B auto-resume once the beacon returns. No single action achieves this.
+One action can't always both make B *safe* and *recover* it — when the spare robot isn't ready and the charger recharges slowly, the only safe single move is to halt B and strand it. The **closed-loop controller** (act → verify → re-decide) sequences moves instead: halt B to make it safe, fail the charger over to recover A, and let B auto-resume once the beacon is back. No single action gets there.
 
 | Full Aegis | Safe% | Success% |
 |---|--:|--:|
 | Single-step | 100.0 | 81.3 |
-| **Multi-step** | **100.0** | **100.0** |
+| **Closed loop** | **100.0** | **100.0** |
 
-Same safety, every stranded incident recovered. (Reactive and Memory-only are
-unchanged by the loop — neither can sequence.) One incident, narrated:
+Same safety, every stranded incident recovered. Reactive and Memory-only don't move — neither can sequence. The narrated incident from `cargo run`:
 
 ```text
-Single-step  Full Aegis -> halt-B               safe=true  success=false
-Closed loop  Full Aegis -> [halt-B then failover-charger]   safe=true  success=true
+Single-step  Full Aegis →  halt-B                          safe ✓  recovered ✗
+Closed loop  Full Aegis →  halt-B → failover-charger        safe ✓  recovered ✓
 ```
 
-## What it is
+### Replay any incident
 
-Aegis Fabric is an **operational-memory runtime** for autonomous fleets: it records every meaningful event into an append-only log, projects that log into a live world model, diagnoses failure, simulates candidate repairs against a calibrated twin, and applies the safest policy-allowed one — keeping every outcome so the next incident is easier.
+Every incident reconstructs from its seed into a tick-by-tick forensic timeline — A's battery, the beacon, B's localization, and what the controller did, frame by frame:
 
-It is **not** a dashboard, not a SaaS wrapper, not a generic AI-agent framework. It is a runtime for remembering failure and recovering safely. The full thesis, the seven core laws, and the layered architecture are in [docs/scope.md](docs/scope.md).
+```bash
+cargo run --release --bin replay -- 3 full       # scenario #3, Full Aegis (keyframes)
+cargo run --release --bin replay -- 3 reactive   # the same incident, the reactive failure
+cargo run --release --bin replay -- 3 full --all # every tick, not just keyframes
+```
 
-This repo is the **MVP wedge**: a simulated fleet that proves the loop end-to-end on one causal incident. What it deliberately does *not* yet solve is stated plainly in [Honest scoping](#honest-scoping).
+```text
+   t  A battery   beacon B localize   B       events / action
+  13  [#.....]  19%  down   [#####.] 0.86  ok      robot A dropped offline; beacon lost
+  14  [#.....]  23%  down   [####..] 0.72  drift   → failover-charger
+  17  [##....]  33%  up     [####..] 0.64  halted  → halt-B  |  beacon restored; B halted
+  19  [##....]  40%  up     [######] 1.00  ok      B resumed; fleet recovered
+verdict: safe=true  recovered=true  time-to-recover=6 ticks
+```
+
+It runs on the same `step` engine as the experiment, so a replay can never disagree with the run it reconstructs — and a test asserts exactly that.
+
+## How it works
+
+```text
+   seeded scenario ─▶ ground-truth world  (charger ▸ battery ▸ beacon ▸ localization)
+                              │ appends to the event log
+                              ▼
+   beacon drops ─▶ observe ▸ noisy belief ─▶ TWIN  (same dynamics, fidelity knob)
+                              │                    │ simulate every policy-allowed fix
+                              ▼                    ▼
+        policy gate ◀──── deciders ▸ Reactive · Memory-only · Full Aegis
+                              │ safest viable action
+                              ▼
+        apply ─▶ verify ─▶ (still unsafe? re-decide) ─▶ score ─▶ memory
+```
+
+The thing that makes it more than automation is the **memory**: every event, action, and outcome is durable, so diagnosis, simulation, and recovery all read from one history instead of three disconnected tools. The full thesis and the seven core laws live in [docs/scope.md](docs/scope.md).
 
 ## What's inside
 
 | | |
 |---|---|
-| **Ground-truth world** | the charger→battery→beacon→localization cascade on a shared, deterministic tick engine ([`sim.rs`](src/sim.rs)) |
-| **The twin** | the *same* dynamics run on a noisy *belief* of the world, with a fidelity knob — a separate input path, so "simulation helps" can't be a tautology |
+| **Ground-truth world** | the charger→battery→beacon→localization cascade on a deterministic tick engine ([`sim.rs`](src/sim.rs)) |
+| **The twin** | the *same* dynamics on a noisy *belief* of the world with a fidelity knob — a separate input path, so "simulation helps" can't be a tautology |
 | **Operational memory** | per-symptom action outcomes; the compounding lesson store ([`decision.rs`](src/decision.rs)) |
 | **Policy gate** | forbids high-risk actions in context (e.g. restart the beacon anchor while B is moving) |
-| **Closed-loop controller** | act → verify → re-decide; sequences actions and auto-resumes a halted robot once safe |
+| **Closed-loop controller** | act → verify → re-decide; sequences actions and auto-resumes a halted robot once it's safe |
 | **Three strategies** | Reactive, Memory-only, Full Aegis — behind one `decide()` |
-| **The experiment** | trains memory, evaluates all three on identical seeded incidents, prints the table, the fidelity sweep, and a narrated incident ([`experiment.rs`](src/experiment.rs)) |
 
-## Proof, not vibes
+## Why the numbers hold
 
-The claim is not asserted, it is measured, and the measurement regenerates:
+Nothing here is asserted — it's measured, and the measurement regenerates:
 
-- **Deterministic simulation.** Every incident is one `u64` seed against the world, so any result replays exactly. 4,000 seeded incidents per strategy, on *identical* scenarios, for a fair paired comparison.
-- **A separated twin.** The decider never sees ground truth — only a fidelity-controlled belief. The fidelity sweep proves the advantage is real and bounded, not an oracle predicting itself.
-- **An honest baseline ablation.** Three arms isolate the two effects: Reactive → Memory-only measures what *remembering* buys; Memory-only → Full Aegis measures what *simulating* buys on top.
-- **A causal demo, narrated.** One incident printed end-to-end: the cascade if nothing is done, then each strategy's choice and outcome.
-- **34 tests, hand-rolled.** Dense `#[test]` modules plus seeded oracle/property sweeps over thousands of cases (`tests/properties.rs`) — determinism, "HaltB is never dangerous", "a faithful twin never picks danger", "degrading the twin never helps", strategy ordering. No test framework dependency; `#![forbid(unsafe_code)]`.
-
-```bash
-cargo run --release            # the table, the fidelity sweep, and the narrated incident
-cargo test --release           # 34 tests: unit + seeded property/oracle sweeps
-```
-
-## Architecture
-
-```text
-   seeded scenario ─▶ ground-truth world  (charger ▸ battery ▸ beacon ▸ localization)
-                              │ emits events to the append-only log
-                              ▼
-   decision point ─▶ observe ▸ noisy belief ─▶ TWIN  (same dynamics, fidelity knob)
-                              │                    │ simulate every policy-allowed action
-                              ▼                    ▼
-        policy gate ◀──── deciders ▸ Reactive · Memory-only · Full Aegis
-                              │ safest viable action
-                              ▼
-        apply to world ─▶ verify ─▶ score (safe / success / MTTR) ─▶ memory
-```
+- **Deterministic simulation.** One `u64` seed *is* the incident, so every result replays exactly. The three strategies are scored on *identical* scenarios, for a fair paired comparison.
+- **A separated twin.** The decider never sees ground truth, only a fidelity-controlled belief — and the fidelity sweep proves the advantage is real and bounded, not an oracle predicting itself.
+- **37 hand-rolled tests.** Dense `#[test]` modules plus seeded oracle/property sweeps over thousands of cases ([`tests/properties.rs`](tests/properties.rs)): determinism & replay, *HaltB is never dangerous*, *do-nothing always ends in danger*, *a faithful twin never picks danger*, *degrading the twin never helps*, *replay agrees with the run*, and strategy ordering. No test-framework dependency; `#![forbid(unsafe_code)]`; clippy-clean.
 
 ## Honest scoping
 
-The MVP proves the loop. By design it does **not** yet solve:
+This repo is the **MVP wedge** — a simulated fleet that proves the loop end-to-end. By design it does **not** yet solve:
 
-- real-world twin calibration (here the twin is a faithful-enough model by construction),
+- real-world twin calibration (here the twin is faithful-enough by construction),
 - causal inference from noisy, distributed, partially-observable signals,
-- a real diagnosis module (the symptom is still hardcoded at the decision point),
+- a real diagnosis module (the symptom is still coarse),
 - real hardware, enterprise hardening, security/compliance.
 
 Those are the frontier, tracked honestly in [docs/STATUS.md](docs/STATUS.md). Naming what isn't solved is the point — a green check that never ran is worth nothing.
@@ -149,9 +151,9 @@ Those are the frontier, tracked honestly in [docs/STATUS.md](docs/STATUS.md). Na
 
 | | |
 |---|---|
-| [docs/STATUS.md](docs/STATUS.md) | what's built, what's tested, and what's still ahead — the living tracker |
-| [docs/scope.md](docs/scope.md) | the full thesis, the seven core laws, and the layered architecture |
-| [CLAUDE.md](CLAUDE.md) | working agreement and project memory for anyone (or any agent) picking this up |
+| [docs/STATUS.md](docs/STATUS.md) | what's built, what's tested, what's still ahead — the living tracker |
+| [docs/scope.md](docs/scope.md) | the full thesis, the seven core laws, the layered architecture |
+| [CLAUDE.md](CLAUDE.md) | working agreement and project memory for anyone picking this up |
 
 ## License
 

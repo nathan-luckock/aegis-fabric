@@ -7,7 +7,7 @@ Update this every working session.
 
 [Overview](../README.md) &nbsp;·&nbsp; [Scope](scope.md) &nbsp;·&nbsp; [Working agreement](../CLAUDE.md)
 
-**Last updated:** 2026-06-22 &nbsp;·&nbsp; **Phase:** closed-loop recovery proven &nbsp;·&nbsp; **Build:** `cargo test` green (34 tests)
+**Last updated:** 2026-06-22 &nbsp;·&nbsp; **Phase:** replay & forensics &nbsp;·&nbsp; **Build:** `cargo test` green (37 tests)
 
 </div>
 
@@ -24,7 +24,7 @@ Update this every working session.
 | ⏸ | deliberately deferred (see [frontier](#the-frontier-not-done-stated-plainly)) |
 
 > Honesty rule: a component is only ✅ if its behaviour is actually checked, not
-> merely compiled. The suite is **34 tests** — dense `#[test]` modules plus
+> merely compiled. The suite is **37 tests** — dense `#[test]` modules plus
 > seeded oracle/property sweeps in `tests/properties.rs`, hand-rolled (no test
 > framework dependency, `#![forbid(unsafe_code)]`).
 
@@ -46,8 +46,8 @@ Update this every working session.
 | Reactive / Memory-only / Full Aegis | `src/decision.rs` | ✅ | all three, with ordering + safety tests |
 | Experiment harness (single + multi-step, fidelity sweep) | `src/experiment.rs` | ✅ | identical seeds across arms |
 | Narrated incident / replay demo | `src/experiment.rs` | ✅ | cascade + per-arm choice + the closed-loop sequence |
+| Replay / forensics timeline | `src/replay.rs`, `src/bin/replay.rs` | ✅ | tick-by-tick reconstruction + keyframes; agrees with the run |
 | Diagnosis | `src/sim.rs` `diagnose` | 🟡 | coarse (beacon-down / battery-draining); no real RCA |
-| Replay viewer (scrubable timeline) | — | ⬜ | event log exists; no UI |
 | CI (fmt + clippy + test) | — | ⬜ | runs locally; no workflow yet |
 
 ---
@@ -79,7 +79,7 @@ in regimes no single action can solve.
 |---|---|:--:|
 | 0 | Thesis, laws, event model, causal demo, safe/dangerous definitions | ✅ |
 | 1 | Memory: ingest + append-only history + entity identity | 🟡 in-sim only |
-| 2 | Replay: reconstruct + deterministic replay + timeline viewer | 🟡 log + narration; no viewer |
+| 2 | Replay: reconstruct + deterministic replay + timeline viewer | ✅ |
 | 3 | Diagnosis: detect, infer cause, rank explanations | 🟡 coarse `diagnose` |
 | 4 | Twin: simulate interventions, compare, reject risky | ✅ |
 | 5 | Controlled remediation: apply fixes, verify, store | ✅ now multi-step |
@@ -90,12 +90,11 @@ in regimes no single action can solve.
 
 ## Next thresholds (recommended order)
 
-1. **Replay viewer** — turn the event log into a scrubable incident timeline.
-2. **Richer failure space + a real diagnosis module** — more fault modes so memory
+1. **Richer failure space + a real diagnosis module** — more fault modes so memory
    and root-cause inference have to work, instead of one near-fixed symptom.
-3. **Second fidelity axis** — miscalibrate the twin's *physics* (not just its
+2. **Second fidelity axis** — miscalibrate the twin's *physics* (not just its
    observations) to map where simulation stops paying off.
-4. **CI** — a fmt + clippy + test workflow so green stays green.
+3. **CI** — a fmt + clippy + test workflow so green stays green.
 
 ---
 
@@ -118,4 +117,3 @@ Deliberately out of scope for the MVP — naming them is the point:
 - **Twin imperfection is belief-noise only.** The twin's *physics* is not yet
   miscalibrated, so the fidelity sweep covers observation error but not model error.
 - **No CI.** `fmt`/`clippy`/`test` are run locally, not enforced on push.
-- **No replay UI.** The event log is captured but only rendered as text.

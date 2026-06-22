@@ -66,6 +66,7 @@ is real and bounded. **Do not collapse the twin into the world.**
 | `event.rs` | append-only `EventLog` — the source-of-truth timeline |
 | `sim.rs` | ground-truth world + shared tick engine, scenario gen, the twin (`observe`), `simulate_from`, single-step `run_scenario`, closed-loop `run_controlled`, `diagnose` |
 | `decision.rs` | `IncidentMemory`, `Policy` gate, the three `Arm`s and their `decide()` |
+| `replay.rs` | deterministic replay → tick-by-tick forensic `Trace`; `src/bin/replay.rs` renders it as a timeline |
 | `experiment.rs` | trains memory, evaluates arms (single + multi-step) on identical seeds, prints tables + fidelity sweep + narrated incident; `pub evaluate`/`train_memory`/`Summary` for tests |
 | `main.rs` | arg parsing → `experiment::run` |
 
@@ -81,7 +82,9 @@ a strong reason; it makes the build instant and every run deterministic.
 cargo run --release              # full report: tables + fidelity sweep + demo
 cargo run --release -- 20000     # n_eval = 20000 (tighter estimates)
 cargo run --release -- 4000 8000 # n_eval, n_train explicit
-cargo test --release             # 34 tests (unit + seeded property/oracle sweeps)
+cargo test --release             # 37 tests (unit + seeded property/oracle sweeps)
+cargo run --release --bin replay -- 3 full       # forensic timeline of incident #3
+cargo run --release --bin replay -- 3 reactive --all  # any seed/strategy, every tick
 cargo fmt && cargo clippy --all-targets   # before committing (CI not yet wired)
 ```
 
@@ -95,13 +98,13 @@ collision-risk state, `success` = B back on task and well-localized.
 
 - ✅ MVP loop + closed-loop controller; 3-arm experiment proves the thesis with a
   clean fidelity sweep. Multi-step Full Aegis: 100% safe / 100% success.
-- ✅ 34 tests (unit + seeded property/oracle sweeps), clippy-clean, no-unsafe.
+- ✅ Deterministic replay/forensics (`replay.rs` + `bin/replay.rs`): tick-by-tick timeline.
+- ✅ 37 tests (unit + seeded property/oracle sweeps), clippy-clean, no-unsafe.
 - 🟡 Diagnosis is coarse (near-one symptom); twin imperfection is belief-noise only.
 - ⏸ Real twin calibration, noisy causal inference, real hardware — the frontier.
 
 ## Next thresholds (see STATUS for the full list)
 
-1. Replay viewer over the event log — **recommended next**.
-2. Richer failure space + a real diagnosis module.
-3. Twin *physics* miscalibration (a second fidelity axis).
-4. CI (fmt + clippy + test workflow).
+1. Richer failure space + a real diagnosis module — **recommended next**.
+2. Twin *physics* miscalibration (a second fidelity axis).
+3. CI (fmt + clippy + test workflow).

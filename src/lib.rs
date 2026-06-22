@@ -16,4 +16,5 @@ pub mod model;
 pub mod event;
 pub mod sim;
 pub mod decision;
+pub mod replay;
 pub mod experiment;
