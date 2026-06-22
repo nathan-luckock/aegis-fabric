@@ -305,6 +305,41 @@ The exact numbers can change, but the experiment must exist.
 
 ---
 
+## Running the experiment
+
+The MVP is built — Rust, zero dependencies, fully deterministic (every scenario
+replays bit-for-bit from its seed).
+
+```bash
+cargo run --release            # defaults: 4000 eval / 8000 train scenarios
+cargo run --release -- 20000   # more scenarios for tighter estimates
+```
+
+Sample result (seed `0x5151`, 4000 evaluation scenarios):
+
+| Arm | Safe% | Success% | Danger% | Score |
+|-----|------:|---------:|--------:|------:|
+| Reactive | 60.8 | 60.8 | 39.2 | 0.43 |
+| Memory-only | 100.0 | 0.0 | 0.0 | 1.00 |
+| **Full Aegis** | **100.0** | **81.3** | **0.0** | **1.81** |
+
+Memory buys *safety* (it learns the safe default). Simulation buys safety **and**
+effectiveness — full mission recovery at zero dangerous actions.
+
+**Twin-fidelity sweep** (Full Aegis) — proving the win is not a perfect-oracle artifact:
+
+| Fidelity | Safe% | Success% | Score |
+|---------:|------:|---------:|------:|
+| 1.00 | 100.0 | 81.3 | 1.81 |
+| 0.75 | 88.8 | 69.0 | 1.35 |
+| 0.50 | 76.5 | 55.7 | 0.85 |
+| 0.25 | 63.0 | 42.1 | 0.31 |
+
+As the twin degrades, simulate-before-act degrades gracefully — and below ~0.5
+fidelity it stops being worth it. That threshold is the honest research frontier.
+
+---
+
 ## Demo scenario
 
 Use a causal failure spine, not three random failures.

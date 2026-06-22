@@ -1,0 +1,10 @@
+[package]
+name = "aegis"
+version = "0.1.0"
+edition = "2021"
+description = "Operational memory runtime for autonomous fleets — MVP simulate-before-act experiment"
+license = "MIT"
+repository = "https://github.com/nathan-luckock/aegis-fabric"
+
+[profile.release]
+opt-level = 3
