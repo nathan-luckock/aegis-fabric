@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 312" width="820" height="312" font-family="ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace">
-  <rect x="0.5" y="0.5" width="819" height="311" rx="10" fill="#0d1117" stroke="#30363d"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 340" width="820" height="340" font-family="ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace">
+  <rect x="0.5" y="0.5" width="819" height="339" rx="10" fill="#0d1117" stroke="#30363d"/>
   <circle cx="24" cy="22" r="6" fill="#ff5f56"/>
   <circle cx="44" cy="22" r="6" fill="#ffbd2e"/>
   <circle cx="64" cy="22" r="6" fill="#27c93f"/>
@@ -14,7 +14,9 @@
     <text x="24" y="215" fill="#c9d1d9">Memory-only      100.0       0.0      0.0    1.00</text>
     <text x="24" y="237" fill="#3fb950">Full Aegis       100.0      81.3      0.0    1.81</text>
     <text x="476" y="237" fill="#3fb950">◄ safe + effective</text>
-    <text x="24" y="275" fill="#e6edf3">twin fidelity sweep ▸ </text>
-    <text x="232" y="275" fill="#8b949e">1.00→1.81   0.75→1.35   0.50→0.85   0.25→0.31</text>
+    <text x="24" y="271" fill="#e6edf3">twin fidelity sweep ▸ </text>
+    <text x="232" y="271" fill="#8b949e">1.00→1.81   0.75→1.35   0.50→0.85   0.25→0.31</text>
+    <text x="24" y="299" fill="#e6edf3">closed loop ▸ </text>
+    <text x="144" y="299" fill="#3fb950">Full Aegis success 81% → 100% at 100% safe</text>
   </g>
 </svg>

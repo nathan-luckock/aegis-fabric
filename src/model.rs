@@ -123,3 +123,26 @@ impl Params {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn actions_enumerate_with_unique_labels() {
+        let all = Action::all();
+        assert_eq!(all.len(), 5);
+        let labels: HashSet<_> = all.iter().map(|a| a.label()).collect();
+        assert_eq!(labels.len(), 5, "every action label must be distinct");
+    }
+
+    #[test]
+    fn ground_truth_params_are_well_ordered() {
+        let p = Params::ground_truth();
+        assert!(p.a_offline_battery < p.a_online_battery, "needs hysteresis");
+        assert!(p.localize_safe_min < p.localize_good);
+        assert!(p.localize_gain > 0.0 && p.localize_decay > 0.0);
+        assert!(p.horizon > 0 && p.a_drain_per_tick > 0.0);
+    }
+}

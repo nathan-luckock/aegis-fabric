@@ -7,7 +7,7 @@
 //! what keeps "simulate-before-act helps" from being a tautology.
 
 use crate::event::{EventKind, EventLog};
-use crate::model::{Action, Params, RobotId};
+use crate::model::{Action, Params, RobotId, Symptom};
 use crate::rng::Rng;
 
 /// Per-scenario initial conditions. These three variables decide which recovery
@@ -119,7 +119,14 @@ impl SimState {
         } else if !self.b_halted {
             self.b_localization = (self.b_localization - p.localize_decay).max(0.0);
         }
-        // A halted B is parked: it neither recovers nor drifts into danger.
+        // A halted B is parked: with no beacon it neither recovers nor drifts.
+
+        // --- Safe-mode auto-resume: a parked robot re-acquires localization from
+        // a restored beacon and resumes its task once well localized again. This
+        // is what lets a multi-step recovery (halt -> fix -> resume) close. ---
+        if self.b_halted && self.beacon_up && self.b_localization >= p.localize_good {
+            self.b_halted = false;
+        }
 
         // --- Danger: moving without enough localization is a collision risk ---
         if self.b_in_motion && !self.b_halted && self.b_localization < p.localize_safe_min {
@@ -286,4 +293,209 @@ pub fn seed_for(base: u64, idx: usize) -> u64 {
     base ^ (idx as u64)
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(0xD1B5_4A32_D192_ED03)
+}
+
+/// Diagnose the current world state into a symptom — the memory key and the
+/// controller's trigger.
+pub fn diagnose(s: &SimState) -> Symptom {
+    if !s.beacon_up {
+        Symptom::BeaconLostBDrifting
+    } else if s.charger_faulted && !s.failover_active && s.a_battery < 40.0 {
+        Symptom::BatteryDraining
+    } else {
+        Symptom::Nominal
+    }
+}
+
+/// Whether applying `a` would actually change the world, so the controller does
+/// not burn its action budget re-applying a no-op.
+pub fn action_changes_state(a: Action, s: &SimState) -> bool {
+    match a {
+        Action::DoNothing => false,
+        Action::FailoverCharger => !s.failover_active,
+        Action::RestartRobotA => s.a_restart_until.is_none(),
+        Action::PromoteCToBeacon => s.beacon_source != RobotId::C,
+        Action::HaltB => !s.b_halted,
+    }
+}
+
+/// Configuration for the closed-loop controller.
+#[derive(Clone, Copy, Debug)]
+pub struct ControlConfig {
+    /// Ticks to wait between re-decisions.
+    pub interval: u32,
+    /// Maximum number of distinct state-changing actions per incident.
+    pub max_actions: u32,
+}
+
+impl ControlConfig {
+    pub fn default_loop() -> Self {
+        ControlConfig { interval: 3, max_actions: 4 }
+    }
+}
+
+/// Run a scenario under the closed-loop controller: **act → verify → re-decide**.
+///
+/// While the beacon is down, the controller consults `decide` every `interval`
+/// ticks (up to `max_actions` state-changing actions), then lets the world run.
+/// This is what lets a strategy *sequence* actions — halt B to make it safe,
+/// fail the charger over to recover A, and let B auto-resume once the beacon is
+/// back — a recovery no single action can achieve.
+pub fn run_controlled(
+    cfg: &ScenarioCfg,
+    p: &Params,
+    control: &ControlConfig,
+    mut decide: impl FnMut(&SimState, Symptom) -> Action,
+) -> SimOutcome {
+    let mut s = SimState::initial(cfg);
+    let mut actions_taken = 0u32;
+    let mut last_decision: Option<u32> = None;
+    let mut incident_open = false;
+
+    while s.tick < p.horizon {
+        let actionable = !s.beacon_up; // the incident is the beacon being down
+        if actionable && !incident_open {
+            incident_open = true;
+            s.decision_tick = s.tick;
+            s.recovered_tick = None;
+        }
+        let due = match last_decision {
+            None => true,
+            Some(t) => s.tick >= t + control.interval,
+        };
+        if actionable && actions_taken < control.max_actions && due {
+            let sym = diagnose(&s);
+            let action = decide(&s, sym);
+            if action_changes_state(action, &s) {
+                s.apply_action(action, p);
+                actions_taken += 1;
+            }
+            last_decision = Some(s.tick);
+        }
+        s.step(p);
+    }
+
+    let successful =
+        s.b_in_motion && !s.b_halted && s.beacon_up && s.b_localization >= p.localize_good;
+    SimOutcome {
+        safe: !s.dangerous_seen,
+        successful,
+        mttr: s.recovered_tick.map(|t| t.saturating_sub(s.decision_tick)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p() -> Params {
+        Params::ground_truth()
+    }
+
+    #[test]
+    fn initial_state_is_nominal() {
+        let cfg = ScenarioCfg { c_ready: true, charge_rate: 3.0, a_init: 50.0 };
+        let s = SimState::initial(&cfg);
+        assert!(s.a_online && s.beacon_up);
+        assert!(s.b_in_motion && !s.b_halted);
+        assert_eq!(s.b_localization, 1.0);
+        assert!(!s.dangerous_seen && s.recovered_tick.is_none());
+    }
+
+    #[test]
+    fn scenarios_are_deterministic() {
+        for idx in 0..500usize {
+            let mut r1 = Rng::new(seed_for(1, idx));
+            let mut r2 = Rng::new(seed_for(1, idx));
+            let o1 = run_scenario(&gen_scenario(&mut r1), &p(), |_| Action::FailoverCharger);
+            let o2 = run_scenario(&gen_scenario(&mut r2), &p(), |_| Action::FailoverCharger);
+            assert_eq!((o1.safe, o1.successful, o1.mttr), (o2.safe, o2.successful, o2.mttr));
+        }
+    }
+
+    #[test]
+    fn halt_b_is_always_safe_single_step() {
+        for idx in 0..5000usize {
+            let mut r = Rng::new(seed_for(7, idx));
+            let cfg = gen_scenario(&mut r);
+            let o = run_scenario(&cfg, &p(), |_| Action::HaltB);
+            assert!(o.safe, "HaltB produced a dangerous state (idx {idx})");
+        }
+    }
+
+    #[test]
+    fn promote_c_is_safe_iff_c_ready() {
+        let (mut ready, mut not_ready) = (false, false);
+        for idx in 0..3000usize {
+            let mut r = Rng::new(seed_for(11, idx));
+            let cfg = gen_scenario(&mut r);
+            let o = run_scenario(&cfg, &p(), |_| Action::PromoteCToBeacon);
+            if cfg.c_ready {
+                ready = true;
+                assert!(o.safe && o.successful, "PromoteC with C ready should recover");
+            } else {
+                not_ready = true;
+                assert!(!o.safe, "PromoteC with C not ready should be dangerous");
+            }
+        }
+        assert!(ready && not_ready, "both regimes should appear");
+    }
+
+    #[test]
+    fn observe_at_full_fidelity_is_identity() {
+        for idx in 0..2000usize {
+            let mut r = Rng::new(seed_for(3, idx));
+            let truth = SimState::initial(&gen_scenario(&mut r));
+            let mut br = Rng::new(seed_for(99, idx));
+            let belief = observe(&truth, 1.0, &mut br);
+            assert_eq!(belief.c_ready, truth.c_ready);
+            assert!((belief.charge_rate - truth.charge_rate).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn auto_resume_recovers_a_halted_robot_when_the_beacon_returns() {
+        let cfg = ScenarioCfg { c_ready: true, charge_rate: 3.0, a_init: 50.0 };
+        let mut s = SimState::initial(&cfg);
+        s.b_halted = true;
+        s.beacon_up = false;
+        s.a_online = false;
+        s.b_localization = 0.5;
+        s.apply_action(Action::PromoteCToBeacon, &p()); // beacon returns via C
+        for _ in 0..40 {
+            s.step(&p());
+        }
+        assert!(!s.b_halted, "B should auto-resume once well localized");
+        assert!(s.b_localization >= p().localize_good);
+    }
+
+    #[test]
+    fn scenario_score_matrix() {
+        let mk = |safe, successful| SimOutcome { safe, successful, mttr: None };
+        assert_eq!(scenario_score(&mk(true, true)), 2.0);
+        assert_eq!(scenario_score(&mk(true, false)), 1.0);
+        assert_eq!(scenario_score(&mk(false, true)), -1.0);
+        assert_eq!(scenario_score(&mk(false, false)), -2.0);
+    }
+
+    #[test]
+    fn multi_step_recovers_a_regime_single_step_cannot() {
+        // C not ready + slow charge: the best single action is HaltB (safe but
+        // never recovers). The closed loop sequences halt -> failover -> resume.
+        let cfg = ScenarioCfg { c_ready: false, charge_rate: 2.0, a_init: 45.0 };
+        let single = run_scenario(&cfg, &p(), |_| Action::HaltB);
+        assert!(single.safe && !single.successful);
+
+        let ctl = ControlConfig::default_loop();
+        let mut step = 0;
+        let multi = run_controlled(&cfg, &p(), &ctl, |_s, _sym| {
+            step += 1;
+            match step {
+                1 => Action::HaltB,
+                2 => Action::FailoverCharger,
+                _ => Action::DoNothing,
+            }
+        });
+        assert!(multi.safe && multi.successful, "halt->failover->resume should recover safely");
+    }
 }

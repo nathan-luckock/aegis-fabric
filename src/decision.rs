@@ -1,10 +1,10 @@
 //! The decision layer: incident memory, the policy gate, and the three arms.
 //!
-//! - Reactive   — a fixed runbook rule. No memory, no simulation.
-//! - Memory-only — picks the action with the best *historical* average. Learns,
-//!                 but cannot adapt to the specifics of the current incident.
-//! - Full Aegis  — simulates every policy-allowed action against the twin and
-//!                 picks the safest viable one. Memory + simulation.
+//! - Reactive: a fixed runbook rule. No memory, no simulation.
+//! - Memory-only: picks the action with the best historical average. Learns,
+//!   but cannot adapt to the specifics of the current incident.
+//! - Full Aegis: simulates every policy-allowed action against the twin and
+//!   picks the safest viable one. Memory + simulation.
 
 use std::collections::HashMap;
 
@@ -57,7 +57,10 @@ impl Policy {
         match a {
             // Restarting the beacon anchor while B is actively moving flaps the
             // beacon and endangers B. Prohibited unless B is already halted.
-            Action::RestartRobotA => !(s.b_in_motion && !s.b_halted),
+            Action::RestartRobotA => {
+                let b_actively_moving = s.b_in_motion && !s.b_halted;
+                !b_actively_moving
+            }
             _ => true,
         }
     }
@@ -139,4 +142,131 @@ fn full_aegis_decide(ctx: &DecisionContext) -> Action {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Params;
+    use crate::rng::Rng;
+    use crate::sim::{gen_scenario, observe, run_scenario, seed_for, ScenarioCfg, SimState};
+
+    fn ctx_for<'a>(
+        belief: SimState,
+        mem: &'a IncidentMemory,
+        pol: &'a Policy,
+        twin: &'a Params,
+    ) -> DecisionContext<'a> {
+        DecisionContext {
+            symptom: Symptom::BeaconLostBDrifting,
+            decision_tick: belief.decision_tick,
+            belief,
+            horizon: twin.horizon,
+            twin_params: twin,
+            memory: mem,
+            policy: pol,
+        }
+    }
+
+    #[test]
+    fn memory_means_are_correct() {
+        let mut m = IncidentMemory::new();
+        let sym = Symptom::BeaconLostBDrifting;
+        m.record(sym, Action::HaltB, 1.0);
+        m.record(sym, Action::HaltB, 1.0);
+        m.record(sym, Action::DoNothing, -2.0);
+        assert_eq!(m.mean(sym, Action::HaltB), Some(1.0));
+        assert_eq!(m.mean(sym, Action::DoNothing), Some(-2.0));
+        assert_eq!(m.mean(sym, Action::FailoverCharger), None);
+    }
+
+    #[test]
+    fn policy_forbids_restart_while_b_moves() {
+        let cfg = ScenarioCfg { c_ready: true, charge_rate: 3.0, a_init: 50.0 };
+        let mut s = SimState::initial(&cfg);
+        let pol = Policy;
+        assert!(!pol.allows(Action::RestartRobotA, &s), "B is moving -> restart forbidden");
+        s.b_halted = true;
+        assert!(pol.allows(Action::RestartRobotA, &s), "B halted -> restart allowed");
+        assert!(pol.allows(Action::HaltB, &s));
+    }
+
+    #[test]
+    fn best_from_memory_skips_forbidden_and_picks_max() {
+        let mut m = IncidentMemory::new();
+        let sym = Symptom::BeaconLostBDrifting;
+        m.record(sym, Action::RestartRobotA, 5.0); // best mean, but forbidden
+        m.record(sym, Action::HaltB, 1.0);
+        m.record(sym, Action::DoNothing, -2.0);
+        let cfg = ScenarioCfg { c_ready: false, charge_rate: 2.0, a_init: 40.0 };
+        let belief = SimState::initial(&cfg); // B moving -> restart forbidden
+        let pol = Policy;
+        let p = Params::ground_truth();
+        let ctx = ctx_for(belief, &m, &pol, &p);
+        assert_eq!(Arm::MemoryOnly.decide(&ctx), Action::HaltB);
+    }
+
+    #[test]
+    fn full_aegis_never_picks_a_forbidden_action() {
+        let p = Params::ground_truth();
+        let mem = IncidentMemory::new();
+        let pol = Policy;
+        for idx in 0..3000usize {
+            let mut r = Rng::new(seed_for(5, idx));
+            let cfg = gen_scenario(&mut r);
+            let mut br = Rng::new(seed_for(50, idx));
+            let mut captured = Action::DoNothing;
+            run_scenario(&cfg, &p, |truth| {
+                let belief = observe(truth, 1.0, &mut br);
+                let a = Arm::FullAegis.decide(&ctx_for(belief, &mem, &pol, &p));
+                captured = a;
+                a
+            });
+            assert_ne!(captured, Action::RestartRobotA, "B moves at decision -> never restart");
+        }
+    }
+
+    #[test]
+    fn full_aegis_with_faithful_twin_is_always_safe() {
+        let p = Params::ground_truth();
+        let mem = IncidentMemory::new();
+        let pol = Policy;
+        for idx in 0..4000usize {
+            let mut r = Rng::new(seed_for(13, idx));
+            let cfg = gen_scenario(&mut r);
+            let mut br = Rng::new(seed_for(130, idx));
+            let o = run_scenario(&cfg, &p, |truth| {
+                let belief = observe(truth, 1.0, &mut br);
+                Arm::FullAegis.decide(&ctx_for(belief, &mem, &pol, &p))
+            });
+            assert!(o.safe, "a faithful twin must yield a safe choice (idx {idx})");
+        }
+    }
+
+    #[test]
+    fn full_aegis_promotes_c_when_c_is_ready() {
+        let p = Params::ground_truth();
+        let mem = IncidentMemory::new();
+        let pol = Policy;
+        // C ready AND slow charge: promoting C is the *uniquely* optimal action
+        // (failover would leave a danger window while A recharges slowly).
+        let mut idx = 0usize;
+        let cfg = loop {
+            let mut r = Rng::new(seed_for(21, idx));
+            let c = gen_scenario(&mut r);
+            if c.c_ready && c.charge_rate < 2.2 {
+                break c;
+            }
+            idx += 1;
+        };
+        let mut br = Rng::new(7);
+        let mut captured = Action::DoNothing;
+        run_scenario(&cfg, &p, |truth| {
+            let belief = observe(truth, 1.0, &mut br);
+            let a = Arm::FullAegis.decide(&ctx_for(belief, &mem, &pol, &p));
+            captured = a;
+            a
+        });
+        assert_eq!(captured, Action::PromoteCToBeacon);
+    }
 }

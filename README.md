@@ -10,6 +10,8 @@ Operational memory for autonomous fleets. When a failure cascades through a robo
 [![Safe recovery](https://img.shields.io/badge/safe%20recovery-100%25-3FB950?style=flat-square&logo=checkmarx&logoColor=white)](#the-result)
 [![vs reactive](https://img.shields.io/badge/vs%20reactive-%2B39pts%20safe-3FB950?style=flat-square)](#the-result)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-8957e5?style=flat-square&logo=rust&logoColor=white)](#)
+[![Tests](https://img.shields.io/badge/tests-34%20passing-3FB950?style=flat-square&logo=rust&logoColor=white)](#proof-not-vibes)
+[![Unsafe](https://img.shields.io/badge/unsafe-forbidden-CE422B?style=flat-square&logo=rust&logoColor=white)](#)
 [![Replay](https://img.shields.io/badge/every%20incident-replayable-2F81F7?style=flat-square)](#proof-not-vibes)
 [![License](https://img.shields.io/badge/license-MIT-2F81F7?style=flat-square)](#license)
 
@@ -61,6 +63,27 @@ And the win is **not** a perfect-oracle artifact. The twin runs on a deliberatel
 | Safe% | 100.0 | 95.1 | 88.8 | 76.5 | 63.0 |
 | Score | 1.81 | 1.61 | 1.35 | 0.85 | 0.31 |
 
+### Closing the loop
+
+A single action can't always both make B safe *and* recover it — when C isn't
+ready and the charger recharges slowly, the only safe single action is to halt B
+and strand it. The **closed-loop controller** (act → verify → re-decide) sequences
+actions instead: halt B to make it safe, fail the charger over to recover A, and
+let B auto-resume once the beacon returns. No single action achieves this.
+
+| Full Aegis | Safe% | Success% |
+|---|--:|--:|
+| Single-step | 100.0 | 81.3 |
+| **Multi-step** | **100.0** | **100.0** |
+
+Same safety, every stranded incident recovered. (Reactive and Memory-only are
+unchanged by the loop — neither can sequence.) One incident, narrated:
+
+```text
+Single-step  Full Aegis -> halt-B               safe=true  success=false
+Closed loop  Full Aegis -> [halt-B then failover-charger]   safe=true  success=true
+```
+
 ## What it is
 
 Aegis Fabric is an **operational-memory runtime** for autonomous fleets: it records every meaningful event into an append-only log, projects that log into a live world model, diagnoses failure, simulates candidate repairs against a calibrated twin, and applies the safest policy-allowed one — keeping every outcome so the next incident is easier.
@@ -77,6 +100,7 @@ This repo is the **MVP wedge**: a simulated fleet that proves the loop end-to-en
 | **The twin** | the *same* dynamics run on a noisy *belief* of the world, with a fidelity knob — a separate input path, so "simulation helps" can't be a tautology |
 | **Operational memory** | per-symptom action outcomes; the compounding lesson store ([`decision.rs`](src/decision.rs)) |
 | **Policy gate** | forbids high-risk actions in context (e.g. restart the beacon anchor while B is moving) |
+| **Closed-loop controller** | act → verify → re-decide; sequences actions and auto-resumes a halted robot once safe |
 | **Three strategies** | Reactive, Memory-only, Full Aegis — behind one `decide()` |
 | **The experiment** | trains memory, evaluates all three on identical seeded incidents, prints the table, the fidelity sweep, and a narrated incident ([`experiment.rs`](src/experiment.rs)) |
 
@@ -88,9 +112,11 @@ The claim is not asserted, it is measured, and the measurement regenerates:
 - **A separated twin.** The decider never sees ground truth — only a fidelity-controlled belief. The fidelity sweep proves the advantage is real and bounded, not an oracle predicting itself.
 - **An honest baseline ablation.** Three arms isolate the two effects: Reactive → Memory-only measures what *remembering* buys; Memory-only → Full Aegis measures what *simulating* buys on top.
 - **A causal demo, narrated.** One incident printed end-to-end: the cascade if nothing is done, then each strategy's choice and outcome.
+- **34 tests, hand-rolled.** Dense `#[test]` modules plus seeded oracle/property sweeps over thousands of cases (`tests/properties.rs`) — determinism, "HaltB is never dangerous", "a faithful twin never picks danger", "degrading the twin never helps", strategy ordering. No test framework dependency; `#![forbid(unsafe_code)]`.
 
 ```bash
 cargo run --release            # the table, the fidelity sweep, and the narrated incident
+cargo test --release           # 34 tests: unit + seeded property/oracle sweeps
 ```
 
 ## Architecture
@@ -114,7 +140,7 @@ The MVP proves the loop. By design it does **not** yet solve:
 
 - real-world twin calibration (here the twin is a faithful-enough model by construction),
 - causal inference from noisy, distributed, partially-observable signals,
-- multi-step remediation (it picks one action per incident),
+- a real diagnosis module (the symptom is still hardcoded at the decision point),
 - real hardware, enterprise hardening, security/compliance.
 
 Those are the frontier, tracked honestly in [docs/STATUS.md](docs/STATUS.md). Naming what isn't solved is the point — a green check that never ran is worth nothing.

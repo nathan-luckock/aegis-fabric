@@ -6,5 +6,8 @@ description = "Operational memory runtime for autonomous fleets — MVP simulate
 license = "MIT"
 repository = "https://github.com/nathan-luckock/aegis-fabric"
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [profile.release]
 opt-level = 3

@@ -65,3 +65,39 @@ impl EventLog {
         self.events.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Action, RobotId};
+
+    #[test]
+    fn log_records_in_order() {
+        let mut log = EventLog::new();
+        assert!(log.is_empty());
+        log.record(1, EventKind::ChargerFaulted);
+        log.record(5, EventKind::BeaconLost);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log.events[0].tick, 1);
+        assert_eq!(log.events[1].tick, 5);
+    }
+
+    #[test]
+    fn every_kind_describes_nonempty() {
+        let kinds = [
+            EventKind::ChargerFaulted,
+            EventKind::BatteryLow(RobotId::A, 12.0),
+            EventKind::RobotOffline(RobotId::A),
+            EventKind::RobotOnline(RobotId::A),
+            EventKind::BeaconLost,
+            EventKind::BeaconRestored,
+            EventKind::LocalizationDegraded(0.3),
+            EventKind::DangerousState(RobotId::B),
+            EventKind::ActionTaken(Action::HaltB),
+            EventKind::FleetRecovered,
+        ];
+        for k in kinds {
+            assert!(!k.describe().is_empty());
+        }
+    }
+}

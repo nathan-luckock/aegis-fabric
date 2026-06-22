@@ -64,23 +64,25 @@ is real and bounded. **Do not collapse the twin into the world.**
 | `rng.rs` | deterministic SplitMix64 PRNG; the basis of replayability |
 | `model.rs` | domain types: `RobotId`, `Action`, `Symptom`, world `Params` |
 | `event.rs` | append-only `EventLog` — the source-of-truth timeline |
-| `sim.rs` | ground-truth world + shared tick engine, scenario gen, the twin (`observe`), `simulate_from`, `run_scenario` |
+| `sim.rs` | ground-truth world + shared tick engine, scenario gen, the twin (`observe`), `simulate_from`, single-step `run_scenario`, closed-loop `run_controlled`, `diagnose` |
 | `decision.rs` | `IncidentMemory`, `Policy` gate, the three `Arm`s and their `decide()` |
-| `experiment.rs` | trains memory, evaluates arms on identical seeds, prints table + fidelity sweep + narrated incident |
+| `experiment.rs` | trains memory, evaluates arms (single + multi-step) on identical seeds, prints tables + fidelity sweep + narrated incident; `pub evaluate`/`train_memory`/`Summary` for tests |
 | `main.rs` | arg parsing → `experiment::run` |
 
-Zero external dependencies — pure `std`. Keep it that way unless there's a strong
-reason; it makes the build instant and every run deterministic.
+Zero external (runtime **and** dev) dependencies — pure `std`, `#![forbid(unsafe_code)]`.
+Tests are hand-rolled seeded sweeps, not proptest. Keep it that way unless there's
+a strong reason; it makes the build instant and every run deterministic.
 
 ---
 
 ## How to run
 
 ```bash
-cargo run --release              # full report: table + fidelity sweep + demo
+cargo run --release              # full report: tables + fidelity sweep + demo
 cargo run --release -- 20000     # n_eval = 20000 (tighter estimates)
 cargo run --release -- 4000 8000 # n_eval, n_train explicit
-cargo fmt && cargo clippy        # before committing (CI not yet wired)
+cargo test --release             # 34 tests (unit + seeded property/oracle sweeps)
+cargo fmt && cargo clippy --all-targets   # before committing (CI not yet wired)
 ```
 
 The decision problem: shared charger faults → A drains → A drops the beacon →
@@ -91,16 +93,15 @@ collision-risk state, `success` = B back on task and well-localized.
 
 ## Current state (keep this short; details in STATUS)
 
-- ✅ MVP loop works; 3-arm experiment proves the thesis with a clean fidelity sweep.
-- 🧪 Most components exercised by the experiment but have **no unit tests yet** —
-  the top debt item.
-- 🟡 Diagnosis is hardcoded to one symptom; remediation is single-step.
+- ✅ MVP loop + closed-loop controller; 3-arm experiment proves the thesis with a
+  clean fidelity sweep. Multi-step Full Aegis: 100% safe / 100% success.
+- ✅ 34 tests (unit + seeded property/oracle sweeps), clippy-clean, no-unsafe.
+- 🟡 Diagnosis is coarse (near-one symptom); twin imperfection is belief-noise only.
 - ⏸ Real twin calibration, noisy causal inference, real hardware — the frontier.
 
 ## Next thresholds (see STATUS for the full list)
 
-1. Multi-step remediation loop (act → verify → re-decide) — **recommended next**.
-2. Replay viewer over the event log.
-3. Richer failure space + a real diagnosis module.
-4. Twin *physics* miscalibration (a second fidelity axis).
-5. Tests + CI.
+1. Replay viewer over the event log — **recommended next**.
+2. Richer failure space + a real diagnosis module.
+3. Twin *physics* miscalibration (a second fidelity axis).
+4. CI (fmt + clippy + test workflow).

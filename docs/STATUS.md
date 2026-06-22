@@ -7,7 +7,7 @@ Update this every working session.
 
 [Overview](../README.md) &nbsp;·&nbsp; [Scope](scope.md) &nbsp;·&nbsp; [Working agreement](../CLAUDE.md)
 
-**Last updated:** 2026-06-22 &nbsp;·&nbsp; **Phase:** MVP wedge proven &nbsp;·&nbsp; **Build:** `cargo run --release` green
+**Last updated:** 2026-06-22 &nbsp;·&nbsp; **Phase:** closed-loop recovery proven &nbsp;·&nbsp; **Build:** `cargo test` green (34 tests)
 
 </div>
 
@@ -17,15 +17,16 @@ Update this every working session.
 
 | Mark | Meaning |
 |---|---|
-| ✅ | built **and** validated (behaviour exercised by the experiment) |
-| 🧪 | built, exercised end-to-end, but **no dedicated unit/property test yet** |
+| ✅ | built **and** tested (unit/property tests assert its behaviour) |
+| 🧪 | built, exercised end-to-end, but no dedicated test yet |
 | 🟡 | partially built / simplified placeholder |
 | ⬜ | not started |
 | ⏸ | deliberately deferred (see [frontier](#the-frontier-not-done-stated-plainly)) |
 
 > Honesty rule: a component is only ✅ if its behaviour is actually checked, not
-> merely compiled. Today the **experiment is the test**; there are no `cargo test`
-> unit tests yet, so most components sit at 🧪. That gap is tracked below.
+> merely compiled. The suite is **34 tests** — dense `#[test]` modules plus
+> seeded oracle/property sweeps in `tests/properties.rs`, hand-rolled (no test
+> framework dependency, `#![forbid(unsafe_code)]`).
 
 ---
 
@@ -33,44 +34,42 @@ Update this every working session.
 
 | Component | File | State | Notes |
 |---|---|:--:|---|
-| Deterministic RNG (SplitMix64) | `src/rng.rs` | 🧪 | seeded, reproducible; underpins replay law #5 |
-| Domain model (robots, actions, symptoms, params) | `src/model.rs` | ✅ | exercised across every scenario |
-| Append-only event log | `src/event.rs` | 🧪 | records the incident timeline; used by the demo |
+| Deterministic RNG (SplitMix64) | `src/rng.rs` | ✅ | determinism + bounds tested |
+| Domain model (robots, actions, symptoms, params) | `src/model.rs` | ✅ | enum + param-ordering tests |
+| Append-only event log | `src/event.rs` | ✅ | ordering + describe tested |
 | Ground-truth world + tick dynamics | `src/sim.rs` | ✅ | charger→battery→beacon→localization cascade |
-| The twin (noisy belief + fidelity knob) | `src/sim.rs` | ✅ | **separate** from ground truth; fidelity sweep proves it |
-| Incident memory (per-symptom action stats) | `src/decision.rs` | ✅ | trained over 8k scenarios; drives Memory-only |
-| Policy gate | `src/decision.rs` | 🧪 | one rule (no restart-A while B moves); needs more |
-| Reactive strategy | `src/decision.rs` | ✅ | fixed runbook baseline |
-| Memory-only strategy | `src/decision.rs` | ✅ | historical-best action |
-| Full Aegis strategy | `src/decision.rs` | ✅ | simulate-before-act, policy-gated |
-| Experiment harness (3-arm, paired, seeded) | `src/experiment.rs` | ✅ | identical scenarios across arms |
-| Twin-fidelity sweep | `src/experiment.rs` | ✅ | 1.00 → 0.25, the anti-oracle proof |
-| Narrated incident / replay demo | `src/experiment.rs` | 🧪 | prints the cascade + each arm's choice |
-| Diagnosis as a real module | — | 🟡 | symptom is hardcoded at the decision point |
-| Multi-step remediation loop | — | ⬜ | one action per incident today |
+| Safe-mode auto-resume | `src/sim.rs` | ✅ | halted robot re-localizes + resumes when safe |
+| The twin (noisy belief + fidelity knob) | `src/sim.rs` | ✅ | separate from truth; fidelity sweep + faithful@1.0 test |
+| Closed-loop controller (act→verify→re-decide) | `src/sim.rs` | ✅ | `run_controlled`; sequences actions |
+| Incident memory (per-symptom action stats) | `src/decision.rs` | ✅ | trained over 8k scenarios |
+| Policy gate | `src/decision.rs` | ✅ | one rule (no restart-A while B moves), tested |
+| Reactive / Memory-only / Full Aegis | `src/decision.rs` | ✅ | all three, with ordering + safety tests |
+| Experiment harness (single + multi-step, fidelity sweep) | `src/experiment.rs` | ✅ | identical seeds across arms |
+| Narrated incident / replay demo | `src/experiment.rs` | ✅ | cascade + per-arm choice + the closed-loop sequence |
+| Diagnosis | `src/sim.rs` `diagnose` | 🟡 | coarse (beacon-down / battery-draining); no real RCA |
 | Replay viewer (scrubable timeline) | — | ⬜ | event log exists; no UI |
-| Unit / property tests (`cargo test`) | — | ⬜ | **the main testing gap** |
-| CI (fmt + clippy + test) | — | ⬜ | not set up |
+| CI (fmt + clippy + test) | — | ⬜ | runs locally; no workflow yet |
 
 ---
 
 ## Current result
 
-Seed `0x5151`, 4,000 evaluation scenarios per strategy (reproduce with `cargo run --release`):
+Seed `0x5151`, 4,000 evaluation scenarios per strategy (`cargo run --release`):
 
-| Strategy | Safe% | Success% | Danger% | Score | MTTR |
-|---|--:|--:|--:|--:|--:|
-| Reactive | 60.8 | 60.8 | 39.2 | 0.43 | 1.0 |
-| Memory-only | 100.0 | 0.0 | 0.0 | 1.00 | — |
-| **Full Aegis** | **100.0** | **81.3** | **0.0** | **1.81** | 2.1 |
+| Strategy | Safe% | Success% | Danger% | Score |
+|---|--:|--:|--:|--:|
+| Reactive | 60.8 | 60.8 | 39.2 | 0.43 |
+| Memory-only | 100.0 | 0.0 | 0.0 | 1.00 |
+| Full Aegis (single-step) | 100.0 | 81.3 | 0.0 | 1.81 |
+| **Full Aegis (closed loop)** | **100.0** | **100.0** | **0.0** | — |
 
-Twin-fidelity sweep (Full Aegis): `1.00 → 1.81`, `0.90 → 1.61`, `0.75 → 1.35`,
-`0.50 → 0.85`, `0.25 → 0.31`. Degrades gracefully; below ~0.5 it is no longer
-worth simulating — the honest threshold.
+Twin-fidelity sweep (single-step Full Aegis): `1.00 → 1.81`, `0.90 → 1.61`,
+`0.75 → 1.35`, `0.50 → 0.85`, `0.25 → 0.31`. Degrades gracefully; below ~0.5 it
+is no longer worth simulating.
 
-**Reading:** memory buys safety (learns the safe default), simulation buys safety
-**and** effectiveness. The Reactive→Memory delta isolates what *remembering*
-buys; the Memory→Full delta isolates what *simulating* buys on top.
+**Reading:** memory buys safety; simulation buys safety + effectiveness; the
+closed loop buys *full* recovery by sequencing actions (halt → failover → resume)
+in regimes no single action can solve.
 
 ---
 
@@ -81,27 +80,22 @@ buys; the Memory→Full delta isolates what *simulating* buys on top.
 | 0 | Thesis, laws, event model, causal demo, safe/dangerous definitions | ✅ |
 | 1 | Memory: ingest + append-only history + entity identity | 🟡 in-sim only |
 | 2 | Replay: reconstruct + deterministic replay + timeline viewer | 🟡 log + narration; no viewer |
-| 3 | Diagnosis: detect, infer cause, rank explanations | 🟡 hardcoded symptom |
+| 3 | Diagnosis: detect, infer cause, rank explanations | 🟡 coarse `diagnose` |
 | 4 | Twin: simulate interventions, compare, reject risky | ✅ |
-| 5 | Controlled remediation: apply one safe fix, verify, store | ✅ single-step |
+| 5 | Controlled remediation: apply fixes, verify, store | ✅ now multi-step |
 | 6 | Knowledge accumulation: improve ranking, reuse memory | ✅ |
 | 7 | Expansion: more fleet types, real hardware, more policy | ⏸ |
-
-The MVP cleared Phase 0 and the core of Phases 4–6 in one slice. Phases 1–3 are
-real but simplified inside the simulator; the next builds harden them.
 
 ---
 
 ## Next thresholds (recommended order)
 
-1. **Multi-step remediation loop** — act → verify → re-decide, instead of one-shot.
-   Biggest jump in "this feels alive"; the architecture already supports it.
-2. **Replay viewer** — turn the event log into a scrubable incident timeline.
-3. **Richer failure space + a real diagnosis module** — more fault modes so memory
-   and root-cause inference have to work, instead of one fixed symptom.
-4. **Second fidelity axis** — miscalibrate the twin's *physics* (not just its
+1. **Replay viewer** — turn the event log into a scrubable incident timeline.
+2. **Richer failure space + a real diagnosis module** — more fault modes so memory
+   and root-cause inference have to work, instead of one near-fixed symptom.
+3. **Second fidelity axis** — miscalibrate the twin's *physics* (not just its
    observations) to map where simulation stops paying off.
-5. **Tests + CI** — unit/property tests and a fmt+clippy+test workflow, so 🧪 → ✅.
+4. **CI** — a fmt + clippy + test workflow so green stays green.
 
 ---
 
@@ -119,10 +113,9 @@ Deliberately out of scope for the MVP — naming them is the point:
 
 ## Known gaps & debt
 
-- **No automated tests.** The experiment is the only behavioural check; there are
-  no `cargo test` unit or property tests. This is the top debt item.
-- **Diagnosis is hardcoded** to the single `BeaconLostBDrifting` symptom.
-- **One decision point per incident** — no closed-loop, multi-step recovery.
-- **Twin imperfection is belief-noise only**; the twin's physics is not yet
+- **Diagnosis is coarse.** `diagnose` keys off beacon/battery state, not a real
+  root-cause inference; the memory symptom space is effectively one symptom.
+- **Twin imperfection is belief-noise only.** The twin's *physics* is not yet
   miscalibrated, so the fidelity sweep covers observation error but not model error.
-- **No CI**, so `fmt`/`clippy` are not enforced on push.
+- **No CI.** `fmt`/`clippy`/`test` are run locally, not enforced on push.
+- **No replay UI.** The event log is captured but only rendered as text.
