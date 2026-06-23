@@ -6,11 +6,12 @@
 
 *A fleet hits a failure cascade at 3am with no one watching. Aegis Fabric remembers it, simulates every candidate fix against a calibrated twin before touching anything real, applies the safest one — and keeps the lesson for next time.*
 
+[![CI](https://img.shields.io/github/actions/workflow/status/nathan-luckock/aegis-fabric/ci.yml?style=flat-square&label=CI&logo=github)](https://github.com/nathan-luckock/aegis-fabric/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-MVP%20%C2%B7%20pre--alpha-orange?style=flat-square)](docs/STATUS.md)
 [![Safe recovery](https://img.shields.io/badge/safe%20recovery-100%25-3FB950?style=flat-square)](#the-numbers)
 [![Closed loop](https://img.shields.io/badge/closed%20loop-100%25%20recovered-3FB950?style=flat-square)](#closing-the-loop)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-8957e5?style=flat-square&logo=rust&logoColor=white)](#)
-[![Tests](https://img.shields.io/badge/tests-48%20passing-3FB950?style=flat-square&logo=rust&logoColor=white)](#why-the-numbers-hold)
+[![Tests](https://img.shields.io/badge/tests-54%20passing-3FB950?style=flat-square&logo=rust&logoColor=white)](#why-the-numbers-hold)
 [![Unsafe](https://img.shields.io/badge/unsafe-forbidden-CE422B?style=flat-square&logo=rust&logoColor=white)](#)
 [![License](https://img.shields.io/badge/license-MIT-2F81F7?style=flat-square)](#license)
 
@@ -81,6 +82,19 @@ Two of the faults — a jammed channel and a degraded transmitter — are *ident
 
 Danger tracks misdiagnosis almost one-for-one — the inference *is* the bottleneck. At perfect fidelity the call is always right, so simulate-before-act is still 100% safe; the floor only cracks once the signal blurs.
 
+### Hedging when unsure (confidence-aware diagnosis)
+
+Plain Full Aegis commits to its single best guess. **Full Aegis+** knows *how sure* the diagnosis is: when the signal can't separate a jam from a brownout, it weighs each action across *both* hypotheses and hedges toward one that's safe either way (halt, or fail over to spare C) instead of gambling on a coin-flip:
+
+| Twin fidelity | 1.00 | 0.75 | 0.50 | 0.25 |
+|---|--:|--:|--:|--:|
+| Full Aegis — Safe% | 100.0 | 85.2 | 76.0 | 69.6 |
+| **Full Aegis+ — Safe%** | **100.0** | **94.6** | **83.2** | **73.5** |
+| Full Aegis — Success% | 91.9 | 77.5 | 69.8 | 63.0 |
+| Full Aegis+ — Success% | 91.9 | 76.8 | 53.1 | 40.2 |
+
+At perfect fidelity it's *identical* to plain Full Aegis (the alt hypothesis gets zero weight). Under moderate ambiguity (0.75) it buys **+9 points of safety for under 1 of success** — a clearly good trade. Under extreme noise it over-hedges (halting too often). The knob is honest about *when* hedging pays.
+
 **The win is not a perfect-oracle artifact.** The twin runs on a deliberately-noisy *belief* of the world, governed by a fidelity knob. As fidelity drops, simulate-before-act degrades gracefully — and once the twin is wrong often enough, it stops beating plain memory. That crossover is the honest research frontier, not a number to bury:
 
 | Twin fidelity | 1.00 | 0.90 | 0.75 | 0.50 | 0.25 |
@@ -112,6 +126,21 @@ Same safety, every stranded incident recovered. Reactive and Memory-only don't m
 ```text
 Single-step  Full Aegis →  halt-B                          safe ✓  recovered ✗
 Closed loop  Full Aegis →  halt-B → failover-charger        safe ✓  recovered ✓
+```
+
+### Learning online, and adapting to drift
+
+Memory doesn't have to be trained offline once and frozen. A cold (empty) memory learns the right fix per fault *during operation* (ε-greedy + an EMA update), climbing from nothing toward the offline level — success% per 500 incidents:
+
+```text
+cold start ▸  38  54  55  54  53  55  58  49  58  56  56  56  54  55  55  58
+```
+
+And because the EMA decays stale lessons, it **adapts when the world drifts under it**. Shift the world so a faster recharge makes `failover` (not `halt`) the best fix for a power cascade: a static memory keeps recommending the stale halt; an online learner re-learns — success% per 500 incidents in the new regime:
+
+```text
+static (no decay) ▸  60  64  61  62  58  60  60  63  58  57  64  58  62  59  62  58
+online (decay)    ▸  55  68  88  88  91  89  86  89  91  88  90  90  88  87  87  87
 ```
 
 ### Replay any incident
@@ -161,10 +190,11 @@ The thing that makes it more than automation is the **memory**: every event, act
 | **Ground-truth world** | three faults (power cascade, beacon jam, brownout) on one deterministic tick engine ([`sim.rs`](src/sim.rs)) |
 | **The twin** | the *same* dynamics on a noisy *belief*, with two knobs — observation *fidelity* and model *calibration* — a separate path, so "simulation helps" can't be a tautology |
 | **Diagnosis** | infers the root cause behind a shared symptom from a noisy signal (`diagnose`); a misread sends the twin to the wrong fault |
-| **Operational memory** | per-root-cause action outcomes; the compounding lesson store ([`decision.rs`](src/decision.rs)) |
+| **Operational memory** | per-root-cause action outcomes; offline-trained *or* learned online with a decaying EMA that adapts to drift ([`decision.rs`](src/decision.rs)) |
 | **Policy gate** | forbids high-risk actions in context (e.g. restart the beacon anchor while B is moving) |
 | **Closed-loop controller** | act → verify → re-decide; sequences actions and auto-resumes a halted robot once it's safe |
-| **Three strategies** | Reactive, Memory-only, Full Aegis — behind one `decide()` |
+| **Four strategies** | Reactive, Memory-only, Full Aegis, and confidence-aware **Full Aegis+** (hedges under ambiguity) — behind one `decide()` |
+| **CI** | GitHub Actions runs fmt + clippy (`-D warnings`) + tests on every push |
 
 ## Why the numbers hold
 
@@ -172,7 +202,7 @@ Nothing here is asserted — it's measured, and the measurement regenerates:
 
 - **Deterministic simulation.** One `u64` seed *is* the incident, so every result replays exactly. The three strategies are scored on *identical* scenarios, for a fair paired comparison.
 - **A separated twin.** The decider never sees ground truth, only a fidelity-controlled belief — and the fidelity sweep proves the advantage is real and bounded, not an oracle predicting itself.
-- **48 hand-rolled tests.** Dense `#[test]` modules plus seeded oracle/property sweeps over thousands of cases ([`tests/properties.rs`](tests/properties.rs)): determinism & replay, *HaltB is never dangerous*, *each fix works for its fault and no other*, *a jam and a brownout differ only in the signal*, *diagnosis lifts memory's success*, *misdiagnosis rises with noise*, *a faithful twin never picks danger*, *a miscalibrated twin does*, *degrading the twin never helps*, and strategy ordering. No test-framework dependency; `#![forbid(unsafe_code)]`; clippy-clean.
+- **54 hand-rolled tests.** Dense `#[test]` modules plus seeded oracle/property sweeps over thousands of cases ([`tests/properties.rs`](tests/properties.rs)): determinism & replay, *HaltB is never dangerous*, *each fix works for its fault and no other*, *a jam and a brownout differ only in the signal*, *diagnosis lifts memory's success*, *misdiagnosis rises with noise*, *the online learner adapts to drift*, *hedging cuts danger under ambiguity*, *a faithful twin never picks danger*, *a miscalibrated twin does*, and strategy ordering. No test-framework dependency; `#![forbid(unsafe_code)]`; clippy-clean; enforced by CI.
 
 ## Honest scoping
 
@@ -180,6 +210,7 @@ This repo is the **MVP wedge** — a simulated fleet that proves the loop end-to
 
 - real-world twin calibration (here the twin's calibration is a synthetic knob, not learned from residuals),
 - full causal inference (diagnosis here resolves three faults from one noisy signal — real, but not RCA over distributed, partially-observable evidence),
+- durable persistence (memory and the event log live in process, not on disk yet),
 - real hardware, enterprise hardening, security/compliance.
 
 Those are the frontier, tracked honestly in [docs/STATUS.md](docs/STATUS.md). Naming what isn't solved is the point — a green check that never ran is worth nothing.

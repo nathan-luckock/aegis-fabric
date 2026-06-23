@@ -3,12 +3,13 @@
 //! types), print the comparison tables, the diagnosis ablation, the
 //! twin-fidelity sweep, and two narrated incidents.
 
-use crate::decision::{Arm, DecisionContext, IncidentMemory, Policy};
+use crate::decision::{best_memory_action, Arm, DecisionContext, IncidentMemory, Policy};
 use crate::model::{Action, Fault, Params, Symptom};
 use crate::rng::Rng;
 use crate::sim::{
-    action_changes_state, diagnose, diagnose_coarse, gen_scenario, observe, run_controlled,
-    run_scenario, run_with_log, scenario_score, seed_for, ControlConfig, ScenarioCfg, SimOutcome,
+    action_changes_state, diagnose, diagnose_coarse, gen_scenario, gen_scenario_in, observe,
+    observe_with_confidence, run_controlled, run_scenario, run_with_log, scenario_score, seed_for,
+    ControlConfig, ScenarioCfg, SimOutcome,
 };
 
 #[derive(Default)]
@@ -136,11 +137,12 @@ fn eval(
             run_controlled(&cfg, &p, &control, |state, _sym| {
                 // Diagnose from the *belief* (noisy), not the truth: a
                 // misdiagnosis must mislead both the memory key and the twin.
-                let belief = observe(state, fidelity, &mut br);
+                let (belief, confidence) = observe_with_confidence(state, fidelity, &mut br);
                 let sym = diagnose(&belief);
                 let ctx = DecisionContext {
                     symptom: sym,
                     belief,
+                    confidence,
                     horizon: p.horizon,
                     decision_tick: state.decision_tick,
                     twin_params: &twin,
@@ -151,7 +153,7 @@ fn eval(
             })
         } else {
             run_scenario(&cfg, &p, |truth| {
-                let belief = observe(truth, fidelity, &mut br);
+                let (belief, confidence) = observe_with_confidence(truth, fidelity, &mut br);
                 let sym = if diagnosed {
                     diagnose(&belief)
                 } else {
@@ -160,6 +162,7 @@ fn eval(
                 let ctx = DecisionContext {
                     symptom: sym,
                     belief,
+                    confidence,
                     horizon: p.horizon,
                     decision_tick: truth.decision_tick,
                     twin_params: &twin,
@@ -233,6 +236,84 @@ fn misdiagnosis_rate(n: usize, seed: u64, fidelity: f64) -> f64 {
     } else {
         wrong as f64 / ambiguous as f64 * 100.0
     }
+}
+
+/// Train memory offline over scenarios drawn from a given recharge band.
+fn train_mem_charge(train_n: usize, seed: u64, lo: f64, hi: f64) -> IncidentMemory {
+    let p = Params::ground_truth();
+    let mut mem = IncidentMemory::new();
+    let actions = Action::all();
+    for idx in 0..train_n {
+        let mut r = Rng::new(seed_for(seed ^ 0x00AB_CDEF, idx));
+        let cfg = gen_scenario_in(&mut r, lo, hi);
+        let a = actions[(r.next_u64() % actions.len() as u64) as usize];
+        let mut sym = Symptom::Nominal;
+        let outcome = run_scenario(&cfg, &p, |truth| {
+            sym = diagnose(truth);
+            a
+        });
+        mem.record(sym, a, scenario_score(&outcome));
+    }
+    mem
+}
+
+/// Run an online (epsilon-greedy) learner that updates `mem` after every
+/// incident with an EMA learning rate `alpha`, in a world whose recharge band is
+/// `charge`. Returns the success rate (%) per batch of `batch` incidents — the
+/// learning curve. `alpha = 0` and `epsilon = 0` makes it a frozen static memory.
+#[allow(clippy::too_many_arguments)]
+fn run_online(
+    n: usize,
+    seed: u64,
+    charge: (f64, f64),
+    alpha: f64,
+    epsilon: f64,
+    mut mem: IncidentMemory,
+    batch: usize,
+) -> Vec<f64> {
+    let p = Params::ground_truth();
+    let policy = Policy;
+    let actions = Action::all();
+    let mut curve = Vec::new();
+    let (mut succ, mut cnt) = (0u32, 0u32);
+
+    for idx in 0..n {
+        let cfg = gen_scenario_in(&mut Rng::new(seed_for(seed, idx)), charge.0, charge.1);
+        let mut er = Rng::new(seed_for(seed ^ 0x0E0E, idx));
+        let mut chosen = (Symptom::Nominal, Action::HaltB);
+        let outcome = run_scenario(&cfg, &p, |truth| {
+            let sym = diagnose(truth);
+            // Epsilon-greedy: explore a random action, else exploit memory.
+            let raw = if er.next_f64() < epsilon {
+                actions[(er.next_u64() % actions.len() as u64) as usize]
+            } else {
+                best_memory_action(&mem, sym, &policy, truth)
+            };
+            let a = if policy.allows(raw, truth) {
+                raw
+            } else {
+                Action::HaltB
+            };
+            chosen = (sym, a);
+            a
+        });
+        mem.learn(chosen.0, chosen.1, scenario_score(&outcome), alpha);
+        succ += outcome.successful as u32;
+        cnt += 1;
+        if cnt as usize == batch {
+            curve.push(succ as f64 / cnt as f64 * 100.0);
+            succ = 0;
+            cnt = 0;
+        }
+    }
+    curve
+}
+
+fn fmt_curve(c: &[f64]) -> String {
+    c.iter()
+        .map(|x| format!("{x:>4.0}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Entry point: run the whole experiment and print the report.
@@ -354,6 +435,24 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
         println!("{:>9.2} {:>14.1} {:>20.1}", f, mis, danger);
     }
 
+    println!("\nConfidence-aware diagnosis — Full Aegis+ knows *how sure* the diagnosis is.");
+    println!("When the signal is ambiguous it weighs each action across BOTH fault");
+    println!("hypotheses and hedges toward one that's safe either way, instead of betting");
+    println!("on a single guess. It trades a little recovery for a lot of safety:");
+    println!(
+        "{:>9} {:>12} {:>12} {:>11} {:>11}",
+        "Fidelity", "Aegis Safe%", "Aegis+ Safe%", "Aegis Succ%", "Aegis+ Succ%"
+    );
+    println!("{}", "-".repeat(58));
+    for f in [1.0, 0.75, 0.5, 0.25] {
+        let plain = evaluate(&Arm::FullAegis, n_eval, seed, f, &mem, false);
+        let robust = evaluate(&Arm::FullAegisRobust, n_eval, seed, f, &mem, false);
+        println!(
+            "{:>9.2} {:>12.1} {:>12.1} {:>11.1} {:>11.1}",
+            f, plain.safe, robust.safe, plain.success, robust.success
+        );
+    }
+
     println!("\nMulti-step remediation (act -> verify -> re-decide) vs single-step, fidelity 1.0:");
     println!(
         "{:<13} {:>10} {:>10} {:>10} {:>10}",
@@ -372,6 +471,31 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
             many.success
         );
     }
+
+    println!("\nOnline learning — Memory-online starts COLD (empty memory) and learns the");
+    println!("right fix per fault during operation (epsilon-greedy, EMA). Success% per");
+    println!("500 incidents climbs from nothing toward the offline-trained level:");
+    let cold = run_online(
+        8000,
+        seed,
+        (1.5, 5.0),
+        0.15,
+        0.15,
+        IncidentMemory::new(),
+        500,
+    );
+    println!("  cold start ▸ {}", fmt_curve(&cold));
+
+    println!("\nAdapting to drift — the world shifts so a faster recharge makes `failover`");
+    println!("the best fix for a power cascade (it used to be `halt`). A static memory keeps");
+    println!("recommending the stale halt; an online learner with decay re-learns. Success%");
+    println!("per 500 incidents in the new (fast-recharge) regime:");
+    let slow_mem = train_mem_charge(8000, seed, 1.5, 2.5);
+    let fast = (4.5, 6.0);
+    let static_curve = run_online(8000, seed ^ 0xD1F7, fast, 0.0, 0.0, slow_mem.clone(), 500);
+    let online_curve = run_online(8000, seed ^ 0xD1F7, fast, 0.2, 0.15, slow_mem, 500);
+    println!("  static (no decay) ▸ {}", fmt_curve(&static_curve));
+    println!("  online (decay)    ▸ {}", fmt_curve(&online_curve));
 
     narrate(
         "Power cascade — C not ready, slow charge",
@@ -437,6 +561,7 @@ fn narrate(title: &str, cfg: &ScenarioCfg, mem: &IncidentMemory) {
             let ctx = DecisionContext {
                 symptom: diagnose(truth),
                 belief,
+                confidence: 1.0,
                 horizon: p.horizon,
                 decision_tick: truth.decision_tick,
                 twin_params: &twin,
@@ -463,6 +588,7 @@ fn narrate(title: &str, cfg: &ScenarioCfg, mem: &IncidentMemory) {
         let ctx = DecisionContext {
             symptom: sym,
             belief,
+            confidence: 1.0,
             horizon: p.horizon,
             decision_tick: state.decision_tick,
             twin_params: &twin,
@@ -609,6 +735,67 @@ mod tests {
         assert!(
             f.success > m.success,
             "simulation recovers more than memory's safe default"
+        );
+    }
+
+    #[test]
+    fn online_learner_improves_from_a_cold_start() {
+        let curve = run_online(
+            8000,
+            0x5151,
+            (1.5, 5.0),
+            0.15,
+            0.15,
+            IncidentMemory::new(),
+            500,
+        );
+        let first = curve[0];
+        let last = *curve.last().unwrap();
+        assert!(
+            last > first + 10.0,
+            "cold-start learner should improve ({first} -> {last})"
+        );
+    }
+
+    #[test]
+    fn online_learning_adapts_to_drift() {
+        // Train on the slow-recharge world, then operate in the fast-recharge one
+        // where `failover` is now best for a power cascade.
+        let slow = train_mem_charge(8000, 0x5151, 1.5, 2.5);
+        let fast = (4.5, 6.0);
+        let stat = run_online(8000, 0x5151 ^ 0xD1F7, fast, 0.0, 0.0, slow.clone(), 500);
+        let online = run_online(8000, 0x5151 ^ 0xD1F7, fast, 0.2, 0.15, slow, 500);
+        let static_final = *stat.last().unwrap();
+        let online_final = *online.last().unwrap();
+        assert!(
+            online_final > static_final + 15.0,
+            "online learner should adapt past the stale static memory ({static_final} -> {online_final})"
+        );
+    }
+
+    #[test]
+    fn robust_equals_plain_when_the_diagnosis_is_certain() {
+        // At perfect fidelity the call is never uncertain (confidence 1.0), so the
+        // confidence-aware arm makes exactly the same decisions as plain Full Aegis.
+        let mem = train_memory(8000, 0x5151);
+        let plain = evaluate(&Arm::FullAegis, 3000, 0x5151, 1.0, &mem, false);
+        let robust = evaluate(&Arm::FullAegisRobust, 3000, 0x5151, 1.0, &mem, false);
+        assert!((plain.success - robust.success).abs() < 0.01);
+        assert_eq!(plain.danger, robust.danger);
+    }
+
+    #[test]
+    fn robust_cuts_danger_under_ambiguity() {
+        // Under moderate observation noise the confidence-aware arm hedges when
+        // unsure, so it is safer than plain Full Aegis (at some cost to success).
+        let mem = train_memory(8000, 0x5151);
+        let plain = evaluate(&Arm::FullAegis, 4000, 0x5151, 0.75, &mem, false);
+        let robust = evaluate(&Arm::FullAegisRobust, 4000, 0x5151, 0.75, &mem, false);
+        assert!(
+            robust.danger < plain.danger,
+            "hedging should cut danger ({} vs {})",
+            robust.danger,
+            plain.danger
         );
     }
 

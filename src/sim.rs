@@ -201,9 +201,9 @@ impl SimState {
         } else if !self.a_online {
             0.0
         } else if self.beacon_jammed {
-            0.45
+            SIGNAL_JAM
         } else if self.tx_degraded {
-            0.05
+            SIGNAL_BROWNOUT
         } else {
             0.0
         };
@@ -274,6 +274,15 @@ pub fn scenario_score(o: &SimOutcome) -> f64 {
 /// Generate a scenario from an RNG stream — a mix of the three faults
 /// (40% power cascade, 30% interference, 30% brownout).
 pub fn gen_scenario(r: &mut Rng) -> ScenarioCfg {
+    gen_scenario_in(r, 1.5, 5.0)
+}
+
+/// Like [`gen_scenario`] but with the recharge rate drawn from a chosen band.
+/// A slow band makes `failover` risky for a power cascade (halt is the best
+/// single move); a fast band makes `failover` the best move — so the *best
+/// action for a power symptom flips between bands*, which is what lets the
+/// online learner demonstrate adapting to drift.
+pub fn gen_scenario_in(r: &mut Rng, charge_lo: f64, charge_hi: f64) -> ScenarioCfg {
     let roll = r.next_f64();
     let fault = if roll < 0.40 {
         Fault::PowerCascade
@@ -285,14 +294,16 @@ pub fn gen_scenario(r: &mut Rng) -> ScenarioCfg {
     ScenarioCfg {
         fault,
         c_ready: r.chance(0.6),
-        charge_rate: r.range_f64(1.5, 5.0),
+        charge_rate: r.range_f64(charge_lo, charge_hi),
         a_init: r.range_f64(30.0, 55.0),
         jam_at: r.range_f64(4.0, 10.0) as u32,
     }
 }
 
-/// Threshold on the observed signal reading that separates a jam (intermittent,
-/// ~0.45) from a degraded transmitter (near-dead, ~0.05).
+/// The signal a jam emits (intermittent) vs a degraded transmitter (near-dead),
+/// and the threshold between them.
+const SIGNAL_JAM: f64 = 0.45;
+const SIGNAL_BROWNOUT: f64 = 0.05;
 const SIGNAL_JAM_THRESHOLD: f64 = 0.25;
 
 /// The twin's view of the world: ground truth seen through noisy sensors.
@@ -302,6 +313,14 @@ const SIGNAL_JAM_THRESHOLD: f64 = 0.25;
 /// never sees the hidden fault flags; it must *infer* them, and that inference is
 /// what can be wrong under noise.
 pub fn observe(truth: &SimState, fidelity: f64, r: &mut Rng) -> SimState {
+    observe_with_confidence(truth, fidelity, r).0
+}
+
+/// Like [`observe`], but also returns a confidence in [0.5, 1.0] for the
+/// jam-vs-brownout call: 1.0 when the signal is far from the threshold (a sure
+/// read), 0.5 when it sits right on it (a coin-flip). A confidence-aware decider
+/// uses this to hedge instead of committing to a single guess.
+pub fn observe_with_confidence(truth: &SimState, fidelity: f64, r: &mut Rng) -> (SimState, f64) {
     let mut belief = truth.clone();
     if !r.chance(fidelity) {
         belief.c_ready = !truth.c_ready;
@@ -313,6 +332,7 @@ pub fn observe(truth: &SimState, fidelity: f64, r: &mut Rng) -> SimState {
     // a jam and a brownout look identical except for the signal reading. Infer it
     // (possibly wrongly) and set the belief's hidden flags to the *guess*, so the
     // twin then simulates whichever fault the runtime believes it is facing.
+    let mut confidence = 1.0;
     if !truth.beacon_up && truth.a_online {
         // The signal sits ~0.20 from the jam/brownout threshold. The noise band
         // is 0.18 at perfect fidelity (just inside that margin, so a perfect read
@@ -323,8 +343,18 @@ pub fn observe(truth: &SimState, fidelity: f64, r: &mut Rng) -> SimState {
         let guess_jam = obs_signal >= SIGNAL_JAM_THRESHOLD;
         belief.beacon_jammed = guess_jam;
         belief.tx_degraded = !guess_jam;
+        // Calibrated confidence: the call is only uncertain when *both* true
+        // signals could have produced this reading within the noise band.
+        // Inside the band-of-doubt it's a coin-flip (0.5); outside, it's certain.
+        let jam_possible = (obs_signal - SIGNAL_JAM).abs() <= band;
+        let brown_possible = (obs_signal - SIGNAL_BROWNOUT).abs() <= band;
+        confidence = if jam_possible && brown_possible {
+            0.5
+        } else {
+            1.0
+        };
     }
-    belief
+    (belief, confidence)
 }
 
 /// Simulate forward from a state under one action to the horizon. Used by both

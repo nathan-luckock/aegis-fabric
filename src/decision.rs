@@ -11,15 +11,18 @@ use std::collections::HashMap;
 use crate::model::{Action, Params, Symptom};
 use crate::sim::{scenario_score, simulate_from, SimState};
 
-/// Running mean of scenario scores per (symptom, action).
+/// The running estimate of scenario score per (symptom, action). `value` is
+/// updated either as a plain running mean (`record`, for offline training) or as
+/// a decayed exponential moving average (`learn`, for online operation).
 #[derive(Default, Clone, Copy)]
 struct Stat {
     n: u32,
-    sum: f64,
+    value: f64,
 }
 
 /// Operational memory: what historically happened when an action was taken for
 /// a given symptom. The compounding knowledge asset, in miniature.
+#[derive(Clone)]
 pub struct IncidentMemory {
     table: HashMap<(Symptom, Action), Stat>,
 }
@@ -31,17 +34,28 @@ impl IncidentMemory {
         }
     }
 
+    /// Offline update: fold `score` into the running mean.
     pub fn record(&mut self, s: Symptom, a: Action, score: f64) {
         let e = self.table.entry((s, a)).or_default();
         e.n += 1;
-        e.sum += score;
+        e.value += (score - e.value) / e.n as f64;
+    }
+
+    /// Online update: fold `score` in as an exponential moving average with
+    /// learning rate `alpha`. Recent outcomes weigh more, so stale lessons decay
+    /// — the memory adapts when the world drifts under it.
+    pub fn learn(&mut self, s: Symptom, a: Action, score: f64, alpha: f64) {
+        let e = self.table.entry((s, a)).or_default();
+        if e.n == 0 {
+            e.value = score;
+        } else {
+            e.value += alpha * (score - e.value);
+        }
+        e.n += 1;
     }
 
     pub fn mean(&self, s: Symptom, a: Action) -> Option<f64> {
-        self.table
-            .get(&(s, a))
-            .filter(|x| x.n > 0)
-            .map(|x| x.sum / x.n as f64)
+        self.table.get(&(s, a)).filter(|x| x.n > 0).map(|x| x.value)
     }
 }
 
@@ -72,6 +86,9 @@ impl Policy {
 pub struct DecisionContext<'a> {
     pub symptom: Symptom,
     pub belief: SimState,
+    /// Confidence in [0.5, 1.0] that `belief`'s jam-vs-brownout call is correct.
+    /// 1.0 when the diagnosis is unambiguous; the robust arm hedges when it's low.
+    pub confidence: f64,
     pub horizon: u32,
     pub decision_tick: u32,
     pub twin_params: &'a Params,
@@ -83,6 +100,10 @@ pub enum Arm {
     Reactive,
     MemoryOnly,
     FullAegis,
+    /// Full Aegis that is *confidence-aware*: under an uncertain diagnosis it
+    /// weighs each action across both fault hypotheses and hedges, rather than
+    /// committing to the single most-likely guess.
+    FullAegisRobust,
 }
 
 impl Arm {
@@ -91,6 +112,7 @@ impl Arm {
             Arm::Reactive => "Reactive",
             Arm::MemoryOnly => "Memory-only",
             Arm::FullAegis => "Full Aegis",
+            Arm::FullAegisRobust => "Full Aegis+",
         }
     }
 
@@ -101,18 +123,31 @@ impl Arm {
             Arm::Reactive => Action::PromoteCToBeacon,
             Arm::MemoryOnly => best_from_memory(ctx),
             Arm::FullAegis => full_aegis_decide(ctx),
+            Arm::FullAegisRobust => full_aegis_robust_decide(ctx),
         }
     }
 }
 
 fn best_from_memory(ctx: &DecisionContext) -> Action {
+    best_memory_action(ctx.memory, ctx.symptom, ctx.policy, &ctx.belief)
+}
+
+/// The policy-allowed action with the best remembered score for `symptom`, or
+/// the safe default (halt) if memory has nothing. Shared by the Memory-only arm
+/// and the online learner.
+pub fn best_memory_action(
+    mem: &IncidentMemory,
+    symptom: Symptom,
+    policy: &Policy,
+    state: &SimState,
+) -> Action {
     let mut best = Action::HaltB; // safe fallback if memory is empty
     let mut best_mean = f64::NEG_INFINITY;
     for a in Action::all() {
-        if !ctx.policy.allows(a, &ctx.belief) {
+        if !policy.allows(a, state) {
             continue;
         }
-        if let Some(m) = ctx.memory.mean(ctx.symptom, a) {
+        if let Some(m) = mem.mean(symptom, a) {
             if m > best_mean {
                 best_mean = m;
                 best = a;
@@ -146,6 +181,44 @@ fn full_aegis_decide(ctx: &DecisionContext) -> Action {
     best
 }
 
+/// Confidence-aware Full Aegis. Under an ambiguous diagnosis it does not commit
+/// to the single most-likely fault: it scores each action as the
+/// confidence-weighted *expectation* over both hypotheses (the believed fault
+/// and its swap), so it prefers an action that is good — or at least safe —
+/// whichever fault it really is. When confidence is 1.0 this is exactly Full
+/// Aegis (the alternative hypothesis gets zero weight).
+fn full_aegis_robust_decide(ctx: &DecisionContext) -> Action {
+    let conf = ctx.confidence;
+    // The alternative hypothesis: the same world with the jam/brownout call flipped.
+    let mut alt = ctx.belief.clone();
+    std::mem::swap(&mut alt.beacon_jammed, &mut alt.tx_degraded);
+
+    let mut best = Action::HaltB;
+    let mut best_score = f64::NEG_INFINITY;
+    for a in Action::all() {
+        if !ctx.policy.allows(a, &ctx.belief) {
+            continue;
+        }
+        let mut primary = ctx.belief.clone();
+        primary.decision_tick = ctx.decision_tick;
+        let o_primary = simulate_from(primary, a, ctx.twin_params, ctx.horizon);
+
+        let mut alternate = alt.clone();
+        alternate.decision_tick = ctx.decision_tick;
+        let o_alt = simulate_from(alternate, a, ctx.twin_params, ctx.horizon);
+
+        let mut score = conf * scenario_score(&o_primary) + (1.0 - conf) * scenario_score(&o_alt);
+        if let Some(m) = ctx.memory.mean(ctx.symptom, a) {
+            score += 1e-3 * m;
+        }
+        if score > best_score {
+            best_score = score;
+            best = a;
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +236,7 @@ mod tests {
             symptom: Symptom::BeaconLostBDrifting,
             decision_tick: belief.decision_tick,
             belief,
+            confidence: 1.0,
             horizon: twin.horizon,
             twin_params: twin,
             memory: mem,
@@ -180,6 +254,23 @@ mod tests {
         assert_eq!(m.mean(sym, Action::HaltB), Some(1.0));
         assert_eq!(m.mean(sym, Action::DoNothing), Some(-2.0));
         assert_eq!(m.mean(sym, Action::FailoverCharger), None);
+    }
+
+    #[test]
+    fn ema_learning_decays_stale_lessons() {
+        let mut m = IncidentMemory::new();
+        let sym = Symptom::BeaconLostPower;
+        // Learn that an action scores +2 ...
+        for _ in 0..200 {
+            m.learn(sym, Action::FailoverCharger, 2.0, 0.2);
+        }
+        assert!((m.mean(sym, Action::FailoverCharger).unwrap() - 2.0).abs() < 0.01);
+        // ... then the world drifts and it now scores -2: the EMA forgets the
+        // stale lesson and tracks the new reality.
+        for _ in 0..200 {
+            m.learn(sym, Action::FailoverCharger, -2.0, 0.2);
+        }
+        assert!(m.mean(sym, Action::FailoverCharger).unwrap() < -1.9);
     }
 
     #[test]
@@ -283,5 +374,32 @@ mod tests {
             a
         });
         assert_eq!(captured, Action::PromoteCToBeacon);
+    }
+
+    #[test]
+    fn robust_arm_hedges_to_a_safe_action_when_unsure() {
+        // A jam-or-brownout with C not ready: committing to either specific fix
+        // is a coin-flip, so the confidence-aware arm hedges to HaltB (safe under
+        // *both* hypotheses) rather than gamble.
+        let p = Params::ground_truth();
+        let mem = IncidentMemory::new();
+        let pol = Policy;
+        let cfg = ScenarioCfg::interference(false, 5); // C not ready
+        let mut captured = Action::DoNothing;
+        run_scenario(&cfg, &p, |truth| {
+            let ctx = DecisionContext {
+                symptom: Symptom::BeaconLostInterference,
+                decision_tick: truth.decision_tick,
+                belief: truth.clone(),
+                confidence: 0.5, // maximally ambiguous
+                horizon: p.horizon,
+                twin_params: &p,
+                memory: &mem,
+                policy: &pol,
+            };
+            captured = Arm::FullAegisRobust.decide(&ctx);
+            Action::HaltB
+        });
+        assert_eq!(captured, Action::HaltB);
     }
 }

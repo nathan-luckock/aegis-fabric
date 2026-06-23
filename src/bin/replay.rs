@@ -41,6 +41,7 @@ fn main() {
         let ctx = DecisionContext {
             symptom: sym,
             belief,
+            confidence: 1.0,
             horizon: p.horizon,
             decision_tick: state.decision_tick,
             twin_params: &twin,

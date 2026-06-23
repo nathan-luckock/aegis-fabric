@@ -7,7 +7,7 @@ Update this every working session.
 
 [Overview](../README.md) &nbsp;·&nbsp; [Scope](scope.md) &nbsp;·&nbsp; [Working agreement](../CLAUDE.md)
 
-**Last updated:** 2026-06-22 &nbsp;·&nbsp; **Phase:** diagnosis under ambiguity (3 faults) &nbsp;·&nbsp; **Build:** `cargo test` green (48 tests)
+**Last updated:** 2026-06-22 &nbsp;·&nbsp; **Phase:** CI · online learning · confidence-aware diagnosis &nbsp;·&nbsp; **Build:** `cargo test` green (54 tests), CI enforced
 
 </div>
 
@@ -24,9 +24,9 @@ Update this every working session.
 | ⏸ | deliberately deferred (see [frontier](#the-frontier-not-done-stated-plainly)) |
 
 > Honesty rule: a component is only ✅ if its behaviour is actually checked, not
-> merely compiled. The suite is **48 tests** — dense `#[test]` modules plus
+> merely compiled. The suite is **54 tests** — dense `#[test]` modules plus
 > seeded oracle/property sweeps in `tests/properties.rs`, hand-rolled (no test
-> framework dependency, `#![forbid(unsafe_code)]`).
+> framework dependency, `#![forbid(unsafe_code)]`), enforced by CI on every push.
 
 ---
 
@@ -43,12 +43,14 @@ Update this every working session.
 | The twin: observation fidelity + model calibration | `src/sim.rs`, `Params::twin` | ✅ | two axes; fidelity sweep + physics-miscalibration sweep; faithful@1.0 |
 | Closed-loop controller (act→verify→re-decide) | `src/sim.rs` | ✅ | `run_controlled`; sequences actions |
 | Diagnosis under ambiguity | `src/sim.rs` `diagnose` + `observe` | ✅ | infers root cause from a noisy signal; lifts memory 0→60%; misdiagnosis drives Full-Aegis danger |
-| Incident memory (per-root-cause action stats) | `src/decision.rs` | ✅ | trained over 8k scenarios |
+| Incident memory (offline mean + online EMA) | `src/decision.rs` | ✅ | `record`/`learn`; EMA decays stale lessons |
+| Online learning (epsilon-greedy, adapts to drift) | `src/experiment.rs` | ✅ | cold-start curve + static-vs-online drift test |
 | Policy gate | `src/decision.rs` | ✅ | one rule (no restart-A while B moves), tested |
-| Reactive / Memory-only / Full Aegis | `src/decision.rs` | ✅ | ordering + safety tests |
-| Experiment harness (single + multi-step, ablation, sweep) | `src/experiment.rs` | ✅ | identical seeds across arms |
+| Reactive / Memory-only / Full Aegis / Full Aegis+ | `src/decision.rs` | ✅ | 4 arms; ordering, safety, hedging tests |
+| Confidence-aware diagnosis (hedging) | `src/sim.rs` `observe_with_confidence`, `decision.rs` | ✅ | calibrated confidence; cuts danger under ambiguity |
+| Experiment harness (single + multi-step, ablation, sweeps) | `src/experiment.rs` | ✅ | identical seeds across arms |
 | Replay / forensics timeline | `src/replay.rs`, `src/bin/replay.rs` | ✅ | tick-by-tick reconstruction; agrees with the run |
-| CI (fmt + clippy + test) | — | ⬜ | runs locally; no workflow yet |
+| CI (fmt + clippy `-D warnings` + test) | `.github/workflows/ci.yml` | ✅ | runs on every push / PR |
 
 ---
 
@@ -77,6 +79,15 @@ Twin-**calibration** sweep (model error, perfect observations): danger rises
 aggressive fix, so success climbs to 100% while safety collapses to ~80%. A
 *wrong* twin is reckless, not merely ineffective.
 
+**Confidence-aware hedging** (Full Aegis+ vs Full Aegis): identical at fidelity
+1.0; at 0.75 hedging lifts safety `85.2% → 94.6%` for under 1 point of success;
+under extreme noise it over-hedges (honest trade).
+
+**Online learning:** a cold (empty) memory climbs `38% → ~58%` success over 8k
+incidents. Under drift (recharge speeds up so `failover` beats `halt` for power),
+a static memory stays at `~60%` while an online learner with decay re-learns to
+`~90%`.
+
 ---
 
 ## Phase roadmap (capability thresholds)
@@ -89,19 +100,20 @@ aggressive fix, so success climbs to 100% while safety collapses to ~80%. A
 | 3 | Diagnosis: detect, infer cause, rank explanations | ✅ 3 faults, under ambiguity |
 | 4 | Twin: simulate interventions, compare, reject risky | ✅ |
 | 5 | Controlled remediation: apply fixes, verify, store | ✅ multi-step |
-| 6 | Knowledge accumulation: improve ranking, reuse memory | ✅ |
+| 6 | Knowledge accumulation: improve ranking, reuse memory, learn online | ✅ |
 | 7 | Expansion: more fleet types, real hardware, more policy | ⏸ |
 
 ---
 
 ## Next thresholds (recommended order)
 
-1. **CI** — a fmt + clippy + test GitHub Actions workflow so green stays green.
-2. **Memory consolidation / online learning** — let memory update *during* a run
-   and decay stale lessons, instead of a fixed offline training pass.
-3. **Confidence-aware diagnosis** — when the signal is ambiguous, output a
-   distribution and let Full Aegis hedge (e.g. prefer a fix that's safe under
-   *either* fault) instead of committing to a single guess.
+1. **Durable persistence** — write the event log and memory to disk so they
+   survive a restart (closes Phase 1 "append-only history + entity identity"
+   beyond in-process).
+2. **A second asset type** — generalise past the A/B/C beacon fleet (e.g. a
+   compute node with its own faults/fixes) so the runtime is domain-agnostic.
+3. **Operator console** — a TUI that streams the live world model + incident feed
+   and lets an operator approve/deny a proposed action.
 
 ---
 
@@ -120,9 +132,9 @@ Deliberately out of scope for the MVP — naming them is the point:
 
 ## Known gaps & debt
 
-- **Diagnosis commits to a single guess.** Under ambiguity it picks the
-  most-likely fault rather than carrying a distribution and hedging — so a
-  borderline signal is a coin-flip, not a "play it safe under either fault".
+- **Everything is in-process.** Memory and the event log are not persisted to
+  disk, so nothing survives a restart yet (Phase 1 is in-sim only).
 - **Twin calibration is a synthetic knob,** not learned from reality — it drifts
   the model on a single dial, not from a residual against observed outcomes.
-- **No CI.** `fmt`/`clippy`/`test` are run locally, not enforced on push.
+- **Confidence is binary-ish.** Hedging keys off a calibrated coin-flip vs
+  certain split; a graded posterior would hedge more proportionately.

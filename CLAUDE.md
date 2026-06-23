@@ -64,8 +64,8 @@ is real and bounded. **Do not collapse the twin into the world.**
 | `rng.rs` | deterministic SplitMix64 PRNG; the basis of replayability |
 | `model.rs` | domain types: `RobotId`, `Action`, `Symptom`, world `Params` |
 | `event.rs` | append-only `EventLog` — the source-of-truth timeline |
-| `sim.rs` | ground-truth world (3 faults: power cascade, beacon jam, brownout) + shared tick engine, scenario gen, the twin (`observe` — infers the fault from a noisy signal), `simulate_from`, single-step `run_scenario`, closed-loop `run_controlled`, root-cause `diagnose` / `diagnose_coarse` |
-| `decision.rs` | `IncidentMemory`, `Policy` gate, the three `Arm`s and their `decide()` |
+| `sim.rs` | ground-truth world (3 faults: power cascade, beacon jam, brownout) + shared tick engine, scenario gen (`gen_scenario` / `gen_scenario_in` for charge regimes), the twin (`observe` / `observe_with_confidence` — infers the fault from a noisy signal + a calibrated confidence), `simulate_from`, `run_scenario`, `run_controlled`, `diagnose` / `diagnose_coarse` |
+| `decision.rs` | `IncidentMemory` (`record` offline mean / `learn` online EMA), `Policy` gate, the four `Arm`s (incl. confidence-aware `FullAegisRobust`) + `best_memory_action` |
 | `replay.rs` | deterministic replay → tick-by-tick forensic `Trace`; `src/bin/replay.rs` renders it as a timeline |
 | `experiment.rs` | trains memory, evaluates arms (single + multi-step) on identical seeds, prints tables + fidelity sweep + narrated incident; `pub evaluate`/`train_memory`/`Summary` for tests |
 | `main.rs` | arg parsing → `experiment::run` |
@@ -82,7 +82,7 @@ a strong reason; it makes the build instant and every run deterministic.
 cargo run --release              # full report: tables + fidelity sweep + demo
 cargo run --release -- 20000     # n_eval = 20000 (tighter estimates)
 cargo run --release -- 4000 8000 # n_eval, n_train explicit
-cargo test --release             # 48 tests (unit + seeded property/oracle sweeps)
+cargo test --release             # 54 tests (unit + seeded property/oracle sweeps)
 cargo run --release --bin replay -- 3 full       # forensic timeline of incident #3 (interference)
 cargo run --release --bin replay -- 3 reactive --all  # any seed/strategy, every tick
 cargo fmt && cargo clippy --all-targets   # before committing (CI not yet wired)
@@ -107,12 +107,17 @@ collision-risk state, `success` = B back on task and well-localized.
   `calibration` (`Params::twin`). Model error is the dangerous one — an optimistic
   twin greenlights `failover`, so success rises to 100% but danger climbs to ~20%.
 - ✅ Closed-loop controller (multi-step) + deterministic replay/forensics.
-- ✅ 48 tests (unit + seeded property/oracle sweeps), clippy + fmt clean, no-unsafe.
-- 🟡 Diagnosis commits to one guess (no distribution/hedging); calibration is a synthetic dial.
+- ✅ **CI** (`.github/workflows/ci.yml`): fmt + clippy `-D warnings` + test on every push.
+- ✅ **Online learning** (`IncidentMemory::learn` EMA + epsilon-greedy in experiment):
+  cold-start curve 38→58%; adapts to drift (static ~60% vs online ~90%).
+- ✅ **Confidence-aware diagnosis** (`Arm::FullAegisRobust`, `observe_with_confidence`):
+  hedges under ambiguity; at fidelity 0.75 safety 85→95% for <1pt success. ==plain at fid 1.0.
+- ✅ 54 tests, clippy + fmt clean, no-unsafe, CI-enforced.
+- 🟡 Everything in-process (no disk persistence); calibration is a synthetic dial.
 - ⏸ Real twin calibration, full causal inference, real hardware — the frontier.
 
 ## Next thresholds (see STATUS for the full list)
 
-1. CI (fmt + clippy + test GitHub Actions workflow) — **recommended next**.
-2. Memory consolidation / online learning (update memory during a run).
-3. Confidence-aware diagnosis (carry a distribution, hedge when ambiguous).
+1. Durable persistence (event log + memory to disk, survive restart) — **recommended next**.
+2. A second asset type (generalise past the A/B/C beacon fleet).
+3. Operator console (TUI: live world model + incident feed + approve/deny).
