@@ -82,7 +82,7 @@ a strong reason; it makes the build instant and every run deterministic.
 cargo run --release              # full report: tables + fidelity sweep + demo
 cargo run --release -- 20000     # n_eval = 20000 (tighter estimates)
 cargo run --release -- 4000 8000 # n_eval, n_train explicit
-cargo test --release             # 42 tests (unit + seeded property/oracle sweeps)
+cargo test --release             # 45 tests (unit + seeded property/oracle sweeps)
 cargo run --release --bin replay -- 3 full       # forensic timeline of incident #3 (interference)
 cargo run --release --bin replay -- 3 reactive --all  # any seed/strategy, every tick
 cargo fmt && cargo clippy --all-targets   # before committing (CI not yet wired)
@@ -100,13 +100,16 @@ collision-risk state, `success` = B back on task and well-localized.
   clean fidelity sweep. Multi-step Full Aegis: 100% safe / 100% success.
 - ✅ Two faults (power cascade + beacon jam) with *different* root fixes; `diagnose`
   distinguishes them and lifts memory success 0→49% (the diagnosis ablation).
+- ✅ Twin has TWO error axes now: observation `fidelity` (belief noise) and model
+  `calibration` (`Params::twin`). Model error is the dangerous one — an optimistic
+  twin greenlights `failover`, so success rises to 100% but danger climbs to ~25%.
 - ✅ Deterministic replay/forensics (`replay.rs` + `bin/replay.rs`): tick-by-tick timeline.
-- ✅ 42 tests (unit + seeded property/oracle sweeps), clippy-clean, no-unsafe.
-- 🟡 Diagnosis reads a clean flag; twin imperfection is belief-noise only.
+- ✅ 45 tests (unit + seeded property/oracle sweeps), clippy-clean, no-unsafe.
+- 🟡 Diagnosis reads a clean flag; twin calibration is a synthetic dial, not learned.
 - ⏸ Real twin calibration, noisy causal inference, real hardware — the frontier.
 
 ## Next thresholds (see STATUS for the full list)
 
-1. Twin *physics* miscalibration (a second fidelity axis) — **recommended next**.
-2. A third fault with overlapping symptoms (diagnosis under ambiguity).
-3. CI (fmt + clippy + test workflow).
+1. A third fault with overlapping symptoms (diagnosis under ambiguity) — **recommended next**.
+2. CI (fmt + clippy + test workflow).
+3. Memory consolidation / online learning (update memory during a run).

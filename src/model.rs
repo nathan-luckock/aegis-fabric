@@ -156,6 +156,22 @@ impl Params {
             restart_downtime: 6,
         }
     }
+
+    /// The twin's *model* of the world. `calibration` in [0, 1]: 1.0 is a perfect
+    /// model (identical to ground truth); lower values drift the **dynamics**
+    /// (not the observations), so the twin mispredicts even from perfect inputs.
+    ///
+    /// The drift is deliberately *optimistic* — the twin underestimates how fast
+    /// B drifts and overestimates how fast it recovers — so a poorly-calibrated
+    /// twin rates risky actions as safe. This is the dangerous kind of wrong.
+    pub fn twin(calibration: f64) -> Self {
+        let drift = (1.0 - calibration).clamp(0.0, 1.0);
+        let mut p = Params::ground_truth();
+        p.localize_decay *= 1.0 - 0.7 * drift; // thinks B drifts slower than it does
+        p.localize_gain *= 1.0 + 0.4 * drift; // thinks B re-localizes faster than it does
+        p.a_online_battery = (p.a_online_battery - 12.0 * drift).max(p.a_offline_battery + 1.0); // thinks A recovers sooner
+        p
+    }
 }
 
 #[cfg(test)]
@@ -178,5 +194,24 @@ mod tests {
         assert!(p.localize_safe_min < p.localize_good);
         assert!(p.localize_gain > 0.0 && p.localize_decay > 0.0);
         assert!(p.horizon > 0 && p.a_drain_per_tick > 0.0);
+    }
+
+    #[test]
+    fn a_perfectly_calibrated_twin_equals_ground_truth() {
+        let gt = Params::ground_truth();
+        let twin = Params::twin(1.0);
+        assert_eq!(twin.localize_decay, gt.localize_decay);
+        assert_eq!(twin.localize_gain, gt.localize_gain);
+        assert_eq!(twin.a_online_battery, gt.a_online_battery);
+    }
+
+    #[test]
+    fn a_drifting_twin_is_optimistic() {
+        let gt = Params::ground_truth();
+        let twin = Params::twin(0.2);
+        // It underestimates drift and overestimates recovery — the dangerous way.
+        assert!(twin.localize_decay < gt.localize_decay);
+        assert!(twin.localize_gain > gt.localize_gain);
+        assert!(twin.a_online_battery < gt.a_online_battery);
     }
 }

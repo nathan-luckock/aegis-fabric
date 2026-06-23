@@ -7,7 +7,7 @@ Update this every working session.
 
 [Overview](../README.md) &nbsp;·&nbsp; [Scope](scope.md) &nbsp;·&nbsp; [Working agreement](../CLAUDE.md)
 
-**Last updated:** 2026-06-22 &nbsp;·&nbsp; **Phase:** richer failure space + diagnosis &nbsp;·&nbsp; **Build:** `cargo test` green (42 tests)
+**Last updated:** 2026-06-22 &nbsp;·&nbsp; **Phase:** twin model error (2nd fidelity axis) &nbsp;·&nbsp; **Build:** `cargo test` green (45 tests)
 
 </div>
 
@@ -24,7 +24,7 @@ Update this every working session.
 | ⏸ | deliberately deferred (see [frontier](#the-frontier-not-done-stated-plainly)) |
 
 > Honesty rule: a component is only ✅ if its behaviour is actually checked, not
-> merely compiled. The suite is **42 tests** — dense `#[test]` modules plus
+> merely compiled. The suite is **45 tests** — dense `#[test]` modules plus
 > seeded oracle/property sweeps in `tests/properties.rs`, hand-rolled (no test
 > framework dependency, `#![forbid(unsafe_code)]`).
 
@@ -40,7 +40,7 @@ Update this every working session.
 | Two faults: power cascade + beacon interference | `src/sim.rs` | ✅ | independent root causes, same surface symptom |
 | Ground-truth world + tick dynamics | `src/sim.rs` | ✅ | battery/beacon/jam/localization on one `step` |
 | Safe-mode auto-resume | `src/sim.rs` | ✅ | halted robot re-localizes + resumes when safe |
-| The twin (noisy belief + fidelity knob) | `src/sim.rs` | ✅ | separate from truth; fidelity sweep + faithful@1.0 test |
+| The twin: observation fidelity + model calibration | `src/sim.rs`, `Params::twin` | ✅ | two axes; fidelity sweep + physics-miscalibration sweep; faithful@1.0 |
 | Closed-loop controller (act→verify→re-decide) | `src/sim.rs` | ✅ | `run_controlled`; sequences actions |
 | Diagnosis (root-cause inference) | `src/sim.rs` `diagnose` | ✅ | distinguishes power vs interference; lifts memory 0→49% |
 | Incident memory (per-root-cause action stats) | `src/decision.rs` | ✅ | trained over 8k scenarios |
@@ -66,9 +66,13 @@ Seed `0x5151`, 4,000 mixed-fault scenarios per strategy (`cargo run --release`):
 **Diagnosis ablation** (single-step memory): coarse "beacon down" key → 0.0%
 success; diagnosed root-cause key → 49.4% success. Diagnosis is doing real work.
 
-Twin-fidelity sweep (single-step Full Aegis): `1.00 → 1.90`, `0.90 → 1.83`,
-`0.75 → 1.73`, `0.50 → 1.54`, `0.25 → 1.37`. Degrades gracefully; around ~0.4
-it stops beating plain (diagnosed) memory.
+Twin-fidelity sweep (observation noise, single-step Full Aegis): `1.00 → 1.90`,
+`0.75 → 1.73`, `0.50 → 1.54`, `0.25 → 1.37`. Degrades gracefully.
+
+Twin-**calibration** sweep (model error, perfect observations): danger rises
+`0% → 8% → 23% → 25%` as the twin drifts optimistic — it greenlights the
+aggressive fix, so success climbs to 100% while safety collapses to ~75%. A
+*wrong* twin is reckless, not merely ineffective.
 
 ---
 
@@ -89,12 +93,11 @@ it stops beating plain (diagnosed) memory.
 
 ## Next thresholds (recommended order)
 
-1. **Twin *physics* miscalibration** — a second fidelity axis: let the twin's
-   model dynamics (not just its observations) drift from ground truth, to map
-   where simulation stops paying off more rigorously.
-2. **A third fault + harder diagnosis** — faults whose symptoms overlap so
+1. **A third fault + harder diagnosis** — faults whose symptoms overlap so
    diagnosis must reason under ambiguity, not read a clean flag.
-3. **CI** — a fmt + clippy + test workflow so green stays green.
+2. **CI** — a fmt + clippy + test workflow so green stays green.
+3. **Memory consolidation / online learning** — let memory update *during* a run
+   and decay stale lessons, instead of a fixed offline training pass.
 
 ---
 
@@ -115,6 +118,6 @@ Deliberately out of scope for the MVP — naming them is the point:
 
 - **Diagnosis reads a clean signal.** It keys off observable beacon/battery
   state; the two root causes don't yet have overlapping or noisy symptoms.
-- **Twin imperfection is belief-noise only.** The twin's *physics* is not yet
-  miscalibrated, so the fidelity sweep covers observation error but not model error.
+- **Twin calibration is a synthetic knob,** not learned from reality — it drifts
+  the model on a single dial, not from a residual against observed outcomes.
 - **No CI.** `fmt`/`clippy`/`test` are run locally, not enforced on push.

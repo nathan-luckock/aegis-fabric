@@ -115,12 +115,15 @@ fn eval(
     base_seed: u64,
     belief_seed: u64,
     fidelity: f64,
+    calibration: f64,
     mem: &IncidentMemory,
     multistep: bool,
     diagnosed: bool,
 ) -> ArmStats {
     let p = Params::ground_truth();
-    let twin = Params::ground_truth();
+    // The twin's model: `calibration` 1.0 is a perfect copy of ground truth,
+    // lower values drift its dynamics (model error, separate from belief noise).
+    let twin = Params::twin(calibration);
     let policy = Policy;
     let control = ControlConfig::default_loop();
     let mut st = ArmStats::default();
@@ -177,7 +180,18 @@ pub fn evaluate(
     mem: &IncidentMemory,
     multistep: bool,
 ) -> Summary {
-    eval(arm, n, seed, seed ^ 0xBEEF, fidelity, mem, multistep, true).summary()
+    eval(
+        arm,
+        n,
+        seed,
+        seed ^ 0xBEEF,
+        fidelity,
+        1.0,
+        mem,
+        multistep,
+        true,
+    )
+    .summary()
 }
 
 fn print_row(name: &str, s: &Summary) {
@@ -225,6 +239,7 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
         seed,
         seed ^ 0xBEEF,
         1.0,
+        1.0,
         &mem_coarse,
         false,
         false,
@@ -235,6 +250,7 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
         n_eval,
         seed,
         seed ^ 0xBEEF,
+        1.0,
         1.0,
         &mem,
         false,
@@ -261,6 +277,33 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
         println!(
             "{:>9.2} {:>6.1} {:>9.1} {:>8.1} {:>8.2}",
             f, s.safe, s.success, s.danger, s.score
+        );
+    }
+
+    println!("\nTwin *physics* miscalibration (Full Aegis, perfect observations) — model");
+    println!("error, not observation noise: an optimistic twin rates risk as safe, so");
+    println!("danger *rises*. A wrong twin is more dangerous than a merely noisy one:");
+    println!(
+        "{:>11} {:>6} {:>9} {:>8} {:>8}",
+        "Calibration", "Safe%", "Success%", "Danger%", "Score"
+    );
+    println!("{}", "-".repeat(45));
+    for cal in [1.0, 0.8, 0.6, 0.4, 0.2] {
+        let s = eval(
+            &Arm::FullAegis,
+            n_eval,
+            seed,
+            seed ^ 0xBEEF,
+            1.0,
+            cal,
+            &mem,
+            false,
+            true,
+        )
+        .summary();
+        println!(
+            "{:>11.2} {:>6.1} {:>9.1} {:>8.1} {:>8.2}",
+            cal, s.safe, s.success, s.danger, s.score
         );
     }
 
@@ -433,6 +476,7 @@ mod tests {
             0x5151,
             0x5151 ^ 0xBEEF,
             1.0,
+            1.0,
             &mem_coarse,
             false,
             false,
@@ -443,6 +487,7 @@ mod tests {
             4000,
             0x5151,
             0x5151 ^ 0xBEEF,
+            1.0,
             1.0,
             &mem_diag,
             false,
@@ -514,6 +559,48 @@ mod tests {
         assert!(
             hi.danger <= lo.danger,
             "lower fidelity should not reduce danger"
+        );
+    }
+
+    #[test]
+    fn a_miscalibrated_twin_is_dangerous_even_with_perfect_observations() {
+        let mem = train_memory(8000, 0x5151);
+        // Perfect twin + perfect observations = oracle = always safe.
+        let good = eval(
+            &Arm::FullAegis,
+            4000,
+            0x5151,
+            0x5151 ^ 0xBEEF,
+            1.0,
+            1.0,
+            &mem,
+            false,
+            true,
+        )
+        .summary();
+        // Same perfect observations, but a drifting (optimistic) twin model.
+        let bad = eval(
+            &Arm::FullAegis,
+            4000,
+            0x5151,
+            0x5151 ^ 0xBEEF,
+            1.0,
+            0.2,
+            &mem,
+            false,
+            true,
+        )
+        .summary();
+        assert_eq!(good.danger, 0.0, "a faithful twin never picks danger");
+        assert!(
+            bad.danger > good.danger,
+            "model error should introduce danger ({} vs {})",
+            bad.danger,
+            good.danger
+        );
+        assert!(
+            bad.score < good.score,
+            "a wrong twin should lower the score"
         );
     }
 }

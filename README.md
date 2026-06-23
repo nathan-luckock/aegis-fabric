@@ -10,7 +10,7 @@
 [![Safe recovery](https://img.shields.io/badge/safe%20recovery-100%25-3FB950?style=flat-square)](#the-numbers)
 [![Closed loop](https://img.shields.io/badge/closed%20loop-100%25%20recovered-3FB950?style=flat-square)](#closing-the-loop)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-8957e5?style=flat-square&logo=rust&logoColor=white)](#)
-[![Tests](https://img.shields.io/badge/tests-42%20passing-3FB950?style=flat-square&logo=rust&logoColor=white)](#why-the-numbers-hold)
+[![Tests](https://img.shields.io/badge/tests-45%20passing-3FB950?style=flat-square&logo=rust&logoColor=white)](#why-the-numbers-hold)
 [![Unsafe](https://img.shields.io/badge/unsafe-forbidden-CE422B?style=flat-square&logo=rust&logoColor=white)](#)
 [![License](https://img.shields.io/badge/license-MIT-2F81F7?style=flat-square)](#license)
 
@@ -76,6 +76,16 @@ That 0 → 49% is the diagnosis layer doing real work — not a label that never
 | Safe% | 100.0 | 98.5 | 95.6 | 90.6 | 86.2 |
 | Score | 1.90 | 1.83 | 1.73 | 1.54 | 1.37 |
 
+**Two ways the twin can be wrong, and they fail differently.** The sweep above is *observation* error — a noisy sensor. The other axis is *model* error: keep the observations perfect, but let the twin's physics drift optimistic (it thinks B drifts slower than it really does). The failure mode inverts — the twin greenlights the aggressive fix (`failover`), so it recovers *more* incidents but walks them through a danger window:
+
+| Twin calibration | 1.00 | 0.80 | 0.60 | 0.40 | 0.20 |
+|---|--:|--:|--:|--:|--:|
+| Safe% | 100.0 | 91.8 | 76.9 | 74.6 | 74.6 |
+| Success% | 89.7 | 93.2 | 99.2 | 100.0 | 100.0 |
+| Danger% | 0.0 | 8.2 | 23.1 | 25.4 | 25.4 |
+
+A *noisy* twin loses safety and success together. A *wrong* twin keeps — even raises — success while safety collapses: it's confident and reckless. That's the precise failure that makes simulate-before-act dangerous if you over-trust the model, and the knob says where it starts.
+
 ### Closing the loop
 
 One action can't always both make B *safe* and *recover* it — when the spare robot isn't ready and the charger recharges slowly, the only safe single move is to halt B and strand it. The **closed-loop controller** (act → verify → re-decide) sequences moves instead: halt B to make it safe, fail the charger over to recover A, and let B auto-resume once the beacon is back. No single action gets there.
@@ -134,7 +144,7 @@ The thing that makes it more than automation is the **memory**: every event, act
 | | |
 |---|---|
 | **Ground-truth world** | two faults (power cascade, beacon jam) on one deterministic tick engine ([`sim.rs`](src/sim.rs)) |
-| **The twin** | the *same* dynamics on a noisy *belief* of the world with a fidelity knob — a separate input path, so "simulation helps" can't be a tautology |
+| **The twin** | the *same* dynamics on a noisy *belief*, with two knobs — observation *fidelity* and model *calibration* — a separate path, so "simulation helps" can't be a tautology |
 | **Diagnosis** | infers the root cause behind a shared symptom (`diagnose`) — the key that makes memory pick the right fix |
 | **Operational memory** | per-root-cause action outcomes; the compounding lesson store ([`decision.rs`](src/decision.rs)) |
 | **Policy gate** | forbids high-risk actions in context (e.g. restart the beacon anchor while B is moving) |
@@ -147,7 +157,7 @@ Nothing here is asserted — it's measured, and the measurement regenerates:
 
 - **Deterministic simulation.** One `u64` seed *is* the incident, so every result replays exactly. The three strategies are scored on *identical* scenarios, for a fair paired comparison.
 - **A separated twin.** The decider never sees ground truth, only a fidelity-controlled belief — and the fidelity sweep proves the advantage is real and bounded, not an oracle predicting itself.
-- **42 hand-rolled tests.** Dense `#[test]` modules plus seeded oracle/property sweeps over thousands of cases ([`tests/properties.rs`](tests/properties.rs)): determinism & replay, *HaltB is never dangerous*, *retune fixes a jam but not a power loss (and vice-versa)*, *diagnosis lifts memory's success*, *a faithful twin never picks danger*, *degrading the twin never helps*, *replay agrees with the run*, and strategy ordering. No test-framework dependency; `#![forbid(unsafe_code)]`; clippy-clean.
+- **45 hand-rolled tests.** Dense `#[test]` modules plus seeded oracle/property sweeps over thousands of cases ([`tests/properties.rs`](tests/properties.rs)): determinism & replay, *HaltB is never dangerous*, *retune fixes a jam but not a power loss (and vice-versa)*, *diagnosis lifts memory's success*, *a faithful twin never picks danger*, *a miscalibrated twin does*, *degrading the twin never helps*, *replay agrees with the run*, and strategy ordering. No test-framework dependency; `#![forbid(unsafe_code)]`; clippy-clean.
 
 ## Honest scoping
 
