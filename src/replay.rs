@@ -65,6 +65,7 @@ pub fn trace(
     let (mut prev_online, mut prev_beacon) = (s.a_online, s.beacon_up);
     let (mut prev_danger, mut prev_halted) = (s.dangerous_seen, s.b_halted);
     let mut prev_jammed = s.beacon_jammed;
+    let mut prev_degraded = s.tx_degraded;
     let mut prev_recovered = s.recovered_tick.is_some();
 
     while s.tick < p.horizon {
@@ -107,6 +108,12 @@ pub fn trace(
         if prev_jammed && !s.beacon_jammed {
             events.push("beacon channel cleared".to_string());
         }
+        if !prev_degraded && s.tx_degraded {
+            events.push("transmitter degraded (brownout)".to_string());
+        }
+        if prev_degraded && !s.tx_degraded {
+            events.push("transmitter recovered".to_string());
+        }
         if prev_beacon && !s.beacon_up {
             events.push("beacon lost".to_string());
         }
@@ -143,6 +150,7 @@ pub fn trace(
         prev_online = s.a_online;
         prev_beacon = s.beacon_up;
         prev_jammed = s.beacon_jammed;
+        prev_degraded = s.tx_degraded;
         prev_danger = s.dangerous_seen;
         prev_halted = s.b_halted;
         prev_recovered = recovered_now;

@@ -34,6 +34,10 @@ pub enum Fault {
     /// A is healthy, but radio interference jams its beacon channel.
     /// Root fix: retune the beacon to a clear channel.
     Interference,
+    /// A is healthy and on a clear channel, but its transmitter has degraded.
+    /// Root fix: power-cycle the radio (failover the charger). Looks *identical*
+    /// to interference in the obvious signals — only the signal reading differs.
+    Brownout,
 }
 
 impl Fault {
@@ -41,6 +45,7 @@ impl Fault {
         match self {
             Fault::PowerCascade => "power-cascade",
             Fault::Interference => "interference",
+            Fault::Brownout => "brownout",
         }
     }
 }
@@ -110,6 +115,8 @@ pub enum Symptom {
     BeaconLostPower,
     /// Beacon lost because A's channel is jammed (A still online).
     BeaconLostInterference,
+    /// Beacon lost because A's transmitter degraded (A online, channel clear).
+    BeaconLostBrownout,
 }
 
 impl Symptom {
@@ -120,6 +127,7 @@ impl Symptom {
             Symptom::BeaconLostBDrifting => "beacon-lost-B-drifting",
             Symptom::BeaconLostPower => "beacon-lost-power",
             Symptom::BeaconLostInterference => "beacon-lost-interference",
+            Symptom::BeaconLostBrownout => "beacon-lost-brownout",
         }
     }
 }

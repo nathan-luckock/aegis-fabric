@@ -133,8 +133,11 @@ fn eval(
         let mut br = Rng::new(seed_for(belief_seed, idx));
 
         let outcome = if multistep {
-            run_controlled(&cfg, &p, &control, |state, sym| {
+            run_controlled(&cfg, &p, &control, |state, _sym| {
+                // Diagnose from the *belief* (noisy), not the truth: a
+                // misdiagnosis must mislead both the memory key and the twin.
                 let belief = observe(state, fidelity, &mut br);
+                let sym = diagnose(&belief);
                 let ctx = DecisionContext {
                     symptom: sym,
                     belief,
@@ -148,12 +151,12 @@ fn eval(
             })
         } else {
             run_scenario(&cfg, &p, |truth| {
-                let sym = if diagnosed {
-                    diagnose(truth)
-                } else {
-                    diagnose_coarse(truth)
-                };
                 let belief = observe(truth, fidelity, &mut br);
+                let sym = if diagnosed {
+                    diagnose(&belief)
+                } else {
+                    diagnose_coarse(&belief)
+                };
                 let ctx = DecisionContext {
                     symptom: sym,
                     belief,
@@ -205,6 +208,33 @@ fn print_row(name: &str, s: &Summary) {
     );
 }
 
+/// Measure how often the runtime misreads a jam as a brownout (or vice versa) —
+/// the ambiguous pair — at a given observation fidelity.
+fn misdiagnosis_rate(n: usize, seed: u64, fidelity: f64) -> f64 {
+    let p = Params::ground_truth();
+    let (mut ambiguous, mut wrong) = (0u32, 0u32);
+    for idx in 0..n {
+        let cfg = gen_scenario(&mut Rng::new(seed_for(seed, idx)));
+        let mut br = Rng::new(seed_for(seed ^ 0xBEEF, idx));
+        run_scenario(&cfg, &p, |truth| {
+            // The ambiguous case: the beacon is down while A is still online.
+            if truth.a_online && !truth.beacon_up {
+                ambiguous += 1;
+                let belief = observe(truth, fidelity, &mut br);
+                if diagnose(&belief) != diagnose(truth) {
+                    wrong += 1;
+                }
+            }
+            Action::HaltB
+        });
+    }
+    if ambiguous == 0 {
+        0.0
+    } else {
+        wrong as f64 / ambiguous as f64 * 100.0
+    }
+}
+
 /// Entry point: run the whole experiment and print the report.
 pub fn run(n_eval: usize, train_n: usize, seed: u64) {
     let mem = train_memory(train_n, seed);
@@ -212,10 +242,13 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
 
     println!("Aegis Fabric — simulate-before-act experiment");
     println!("  {n_eval} eval scenarios / {train_n} train scenarios | seed {seed:#x}\n");
-    println!("Two independent faults, 50/50, both surfacing as 'B loses localization':");
-    println!("  - power cascade: charger faults, A drains, beacon goes dark");
-    println!("  - interference: A is healthy, its beacon channel is jammed");
-    println!("The right *root* fix differs by fault, so diagnosis matters.\n");
+    println!("Three faults, all surfacing as 'B loses localization', each needing a");
+    println!("different root fix:");
+    println!("  - power cascade: charger faults, A drains offline      -> failover");
+    println!("  - interference:  A healthy, beacon channel jammed      -> switch-channel");
+    println!("  - brownout:      A healthy, transmitter degraded       -> failover");
+    println!("Interference and brownout look identical but for a noisy signal reading,");
+    println!("so diagnosis must reason under ambiguity.\n");
 
     println!(
         "{:<13} {:>6} {:>9} {:>8} {:>8} {:>6}",
@@ -307,6 +340,20 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
         );
     }
 
+    println!("\nDiagnosis under ambiguity — a jam and a brownout are identical except for a");
+    println!("noisy signal reading. As observation fidelity drops the runtime misreads one");
+    println!("for the other, and Full Aegis is led to simulate (and apply) the wrong fix:");
+    println!(
+        "{:>9} {:>14} {:>20}",
+        "Fidelity", "Misdiagnosed%", "Full-Aegis Danger%"
+    );
+    println!("{}", "-".repeat(45));
+    for f in [1.0, 0.9, 0.75, 0.5, 0.25] {
+        let mis = misdiagnosis_rate(n_eval, seed, f);
+        let danger = evaluate(&Arm::FullAegis, n_eval, seed, f, &mem, false).danger;
+        println!("{:>9.2} {:>14.1} {:>20.1}", f, mis, danger);
+    }
+
     println!("\nMulti-step remediation (act -> verify -> re-decide) vs single-step, fidelity 1.0:");
     println!(
         "{:<13} {:>10} {:>10} {:>10} {:>10}",
@@ -338,6 +385,11 @@ pub fn run(n_eval: usize, train_n: usize, seed: u64) {
         &find(seed ^ 0xBEAD, |c| {
             c.fault == Fault::Interference && !c.c_ready
         }),
+        &mem,
+    );
+    narrate(
+        "Brownout — C not ready (looks like interference, needs failover)",
+        &find(seed ^ 0xB202, |c| c.fault == Fault::Brownout && !c.c_ready),
         &mem,
     );
 }
@@ -464,6 +516,21 @@ mod tests {
                 }
             }
         }
+        // Brownout: failover (power-cycle the radio) is the winner — and notably
+        // NOT switch-channel, the fix for its look-alike, interference.
+        let failover = mem
+            .mean(Symptom::BeaconLostBrownout, Action::FailoverCharger)
+            .expect("seen");
+        for a in Action::all() {
+            if a != Action::FailoverCharger {
+                if let Some(m) = mem.mean(Symptom::BeaconLostBrownout, a) {
+                    assert!(
+                        failover >= m,
+                        "brownout: failover should be best, but {a:?} = {m}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -500,6 +567,20 @@ mod tests {
             "diagnosis should materially lift memory's success ({} vs {})",
             diag.success,
             coarse.success
+        );
+    }
+
+    #[test]
+    fn ambiguity_misdiagnosis_rises_with_observation_noise() {
+        let clean = misdiagnosis_rate(4000, 0x5151, 1.0);
+        let noisy = misdiagnosis_rate(4000, 0x5151, 0.25);
+        assert_eq!(
+            clean, 0.0,
+            "perfect observation -> a perfect jam/brownout call"
+        );
+        assert!(
+            noisy > 5.0,
+            "noise should cause real misdiagnosis ({noisy}% vs {clean}%)"
         );
     }
 

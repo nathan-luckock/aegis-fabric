@@ -15,6 +15,7 @@ pub enum EventKind {
     BeaconLost,
     BeaconRestored,
     BeaconJammed,
+    TransmitterDegraded,
     ChannelSwitched,
     LocalizationDegraded(f64),
     DangerousState(RobotId),
@@ -32,6 +33,7 @@ impl EventKind {
             EventKind::BeaconLost => "beacon network lost".to_string(),
             EventKind::BeaconRestored => "beacon network restored".to_string(),
             EventKind::BeaconJammed => "beacon channel jammed (interference)".to_string(),
+            EventKind::TransmitterDegraded => "beacon transmitter degraded (brownout)".to_string(),
             EventKind::ChannelSwitched => "beacon retuned to a clear channel".to_string(),
             EventKind::LocalizationDegraded(q) => format!("B localization degraded ({q:.2})"),
             EventKind::DangerousState(r) => {
@@ -98,6 +100,7 @@ mod tests {
             EventKind::BeaconLost,
             EventKind::BeaconRestored,
             EventKind::BeaconJammed,
+            EventKind::TransmitterDegraded,
             EventKind::ChannelSwitched,
             EventKind::LocalizationDegraded(0.3),
             EventKind::DangerousState(RobotId::B),

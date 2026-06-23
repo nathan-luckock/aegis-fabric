@@ -64,7 +64,7 @@ is real and bounded. **Do not collapse the twin into the world.**
 | `rng.rs` | deterministic SplitMix64 PRNG; the basis of replayability |
 | `model.rs` | domain types: `RobotId`, `Action`, `Symptom`, world `Params` |
 | `event.rs` | append-only `EventLog` — the source-of-truth timeline |
-| `sim.rs` | ground-truth world (two faults: power cascade + beacon jam) + shared tick engine, scenario gen, the twin (`observe`), `simulate_from`, single-step `run_scenario`, closed-loop `run_controlled`, root-cause `diagnose` / `diagnose_coarse` |
+| `sim.rs` | ground-truth world (3 faults: power cascade, beacon jam, brownout) + shared tick engine, scenario gen, the twin (`observe` — infers the fault from a noisy signal), `simulate_from`, single-step `run_scenario`, closed-loop `run_controlled`, root-cause `diagnose` / `diagnose_coarse` |
 | `decision.rs` | `IncidentMemory`, `Policy` gate, the three `Arm`s and their `decide()` |
 | `replay.rs` | deterministic replay → tick-by-tick forensic `Trace`; `src/bin/replay.rs` renders it as a timeline |
 | `experiment.rs` | trains memory, evaluates arms (single + multi-step) on identical seeds, prints tables + fidelity sweep + narrated incident; `pub evaluate`/`train_memory`/`Summary` for tests |
@@ -82,7 +82,7 @@ a strong reason; it makes the build instant and every run deterministic.
 cargo run --release              # full report: tables + fidelity sweep + demo
 cargo run --release -- 20000     # n_eval = 20000 (tighter estimates)
 cargo run --release -- 4000 8000 # n_eval, n_train explicit
-cargo test --release             # 45 tests (unit + seeded property/oracle sweeps)
+cargo test --release             # 48 tests (unit + seeded property/oracle sweeps)
 cargo run --release --bin replay -- 3 full       # forensic timeline of incident #3 (interference)
 cargo run --release --bin replay -- 3 reactive --all  # any seed/strategy, every tick
 cargo fmt && cargo clippy --all-targets   # before committing (CI not yet wired)
@@ -98,18 +98,21 @@ collision-risk state, `success` = B back on task and well-localized.
 
 - ✅ MVP loop + closed-loop controller; 3-arm experiment proves the thesis with a
   clean fidelity sweep. Multi-step Full Aegis: 100% safe / 100% success.
-- ✅ Two faults (power cascade + beacon jam) with *different* root fixes; `diagnose`
-  distinguishes them and lifts memory success 0→49% (the diagnosis ablation).
-- ✅ Twin has TWO error axes now: observation `fidelity` (belief noise) and model
+- ✅ THREE faults (power cascade, beacon jam, brownout) with different root fixes.
+  Jam & brownout look identical but for a noisy `signal_reading`, so `diagnose`
+  is a real inference (in `observe`) that misfires under noise. Memory 0→60%.
+- ✅ Diagnosis under ambiguity: misdiagnosis rises 0→33% as fidelity drops, and
+  Full-Aegis danger tracks it 0→30% — a misread sends the twin to the wrong fault.
+- ✅ Twin has TWO error axes: observation `fidelity` (belief noise) and model
   `calibration` (`Params::twin`). Model error is the dangerous one — an optimistic
-  twin greenlights `failover`, so success rises to 100% but danger climbs to ~25%.
-- ✅ Deterministic replay/forensics (`replay.rs` + `bin/replay.rs`): tick-by-tick timeline.
-- ✅ 45 tests (unit + seeded property/oracle sweeps), clippy-clean, no-unsafe.
-- 🟡 Diagnosis reads a clean flag; twin calibration is a synthetic dial, not learned.
-- ⏸ Real twin calibration, noisy causal inference, real hardware — the frontier.
+  twin greenlights `failover`, so success rises to 100% but danger climbs to ~20%.
+- ✅ Closed-loop controller (multi-step) + deterministic replay/forensics.
+- ✅ 48 tests (unit + seeded property/oracle sweeps), clippy + fmt clean, no-unsafe.
+- 🟡 Diagnosis commits to one guess (no distribution/hedging); calibration is a synthetic dial.
+- ⏸ Real twin calibration, full causal inference, real hardware — the frontier.
 
 ## Next thresholds (see STATUS for the full list)
 
-1. A third fault with overlapping symptoms (diagnosis under ambiguity) — **recommended next**.
-2. CI (fmt + clippy + test workflow).
-3. Memory consolidation / online learning (update memory during a run).
+1. CI (fmt + clippy + test GitHub Actions workflow) — **recommended next**.
+2. Memory consolidation / online learning (update memory during a run).
+3. Confidence-aware diagnosis (carry a distribution, hedge when ambiguous).

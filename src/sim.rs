@@ -25,7 +25,8 @@ pub struct ScenarioCfg {
     pub charge_rate: f64,
     /// A's starting battery — sets how long until a power cascade begins.
     pub a_init: f64,
-    /// Tick at which interference jams A's beacon (ignored for a power cascade).
+    /// Tick at which interference jams A's beacon, or a brownout degrades the
+    /// transmitter (ignored for a power cascade).
     pub jam_at: u32,
 }
 
@@ -45,6 +46,17 @@ impl ScenarioCfg {
     pub fn interference(c_ready: bool, jam_at: u32) -> Self {
         ScenarioCfg {
             fault: Fault::Interference,
+            c_ready,
+            charge_rate: 4.0,
+            a_init: 50.0,
+            jam_at,
+        }
+    }
+
+    /// A brownout scenario (A's transmitter degrades at `jam_at`).
+    pub fn brownout(c_ready: bool, jam_at: u32) -> Self {
+        ScenarioCfg {
+            fault: Fault::Brownout,
             c_ready,
             charge_rate: 4.0,
             a_init: 50.0,
@@ -80,6 +92,11 @@ pub struct SimState {
     pub beacon_up: bool,
     pub beacon_jammed: bool,
     pub jam_at: Option<u32>,
+    pub tx_degraded: bool,
+    pub degrade_at: Option<u32>,
+    /// Observable beacon signal quality in [0, 1]. The runtime can read this
+    /// (noisily) but not the hidden jam/degrade flags — it must infer the cause.
+    pub signal_reading: f64,
     pub c_ready: bool,
     pub b_localization: f64,
     pub b_in_motion: bool,
@@ -90,13 +107,20 @@ pub struct SimState {
 
 impl SimState {
     pub fn initial(cfg: &ScenarioCfg) -> Self {
-        let interference = cfg.fault == Fault::Interference;
+        let jam_at = match cfg.fault {
+            Fault::Interference => Some(cfg.jam_at),
+            _ => None,
+        };
+        let degrade_at = match cfg.fault {
+            Fault::Brownout => Some(cfg.jam_at),
+            _ => None,
+        };
         SimState {
             tick: 0,
             decision_tick: 0,
             // Power cascade: the charger has faulted and A is draining.
-            // Interference: the charger is healthy; the jam arrives at jam_at.
-            charger_faulted: !interference,
+            // Interference / brownout: the charger is healthy; the fault arrives later.
+            charger_faulted: cfg.fault == Fault::PowerCascade,
             failover_active: false,
             charge_rate: cfg.charge_rate,
             a_battery: cfg.a_init,
@@ -105,7 +129,10 @@ impl SimState {
             beacon_source: RobotId::A,
             beacon_up: true,
             beacon_jammed: false,
-            jam_at: if interference { Some(cfg.jam_at) } else { None },
+            jam_at,
+            tx_degraded: false,
+            degrade_at,
+            signal_reading: 1.0,
             c_ready: cfg.c_ready,
             b_localization: 1.0,
             b_in_motion: true,
@@ -119,10 +146,15 @@ impl SimState {
     pub fn step(&mut self, p: &Params) {
         self.tick += 1;
 
-        // --- Interference onset: the jam arrives once, at jam_at ---
+        // --- Fault onset: jam or transmitter degradation arrives once ---
         if let Some(t) = self.jam_at {
             if self.tick == t {
                 self.beacon_jammed = true;
+            }
+        }
+        if let Some(t) = self.degrade_at {
+            if self.tick == t {
+                self.tx_degraded = true;
             }
         }
 
@@ -152,12 +184,28 @@ impl SimState {
         }
 
         // --- Beacon availability ---
-        // A's beacon needs A online AND a clear channel; C serves on its own
-        // channel, so it is immune to A's jamming.
+        // A's beacon needs A online, a clear channel, and a working transmitter;
+        // C serves on its own radio, immune to A's jam/degrade.
         self.beacon_up = match self.beacon_source {
-            RobotId::A => self.a_online && !self.beacon_jammed,
+            RobotId::A => self.a_online && !self.beacon_jammed && !self.tx_degraded,
             RobotId::C => self.c_ready,
             RobotId::B => false,
+        };
+
+        // --- Observable signal reading: the one clue that separates a jam from a
+        // brownout. A jam is intermittent (mid reading); a degraded transmitter
+        // is near-dead (low reading); an offline A reads zero; a healthy beacon
+        // reads full. The runtime sees this (noisily) but not the cause. ---
+        self.signal_reading = if self.beacon_up {
+            1.0
+        } else if !self.a_online {
+            0.0
+        } else if self.beacon_jammed {
+            0.45
+        } else if self.tx_degraded {
+            0.05
+        } else {
+            0.0
         };
 
         // --- B localization: recovers with a beacon, drifts without one ---
@@ -195,7 +243,14 @@ impl SimState {
     pub fn apply_action(&mut self, a: Action, p: &Params) {
         match a {
             Action::DoNothing => {}
-            Action::FailoverCharger => self.failover_active = true,
+            Action::FailoverCharger => {
+                // Failing over to the backup charger also power-cycles A's radio,
+                // which recovers a degraded transmitter (a brownout) as well as
+                // recharging the battery (a power cascade).
+                self.failover_active = true;
+                self.tx_degraded = false;
+                self.degrade_at = None;
+            }
             Action::RestartRobotA => {
                 self.a_restart_until = Some(self.tick + p.restart_downtime);
                 self.a_online = false;
@@ -216,12 +271,16 @@ pub fn scenario_score(o: &SimOutcome) -> f64 {
     (if o.safe { 1.0 } else { -2.0 }) + (if o.successful { 1.0 } else { 0.0 })
 }
 
-/// Generate a scenario from an RNG stream — a 50/50 mix of the two faults.
+/// Generate a scenario from an RNG stream — a mix of the three faults
+/// (40% power cascade, 30% interference, 30% brownout).
 pub fn gen_scenario(r: &mut Rng) -> ScenarioCfg {
-    let fault = if r.chance(0.5) {
+    let roll = r.next_f64();
+    let fault = if roll < 0.40 {
         Fault::PowerCascade
-    } else {
+    } else if roll < 0.70 {
         Fault::Interference
+    } else {
+        Fault::Brownout
     };
     ScenarioCfg {
         fault,
@@ -232,10 +291,16 @@ pub fn gen_scenario(r: &mut Rng) -> ScenarioCfg {
     }
 }
 
-/// The twin's view of the world: ground truth seen through a noisy sensor.
-/// `fidelity == 1.0` returns the truth exactly (a perfect oracle); lower
-/// fidelity flips C's readiness and blurs the recharge estimate. This is the
-/// knob the fidelity sweep turns to prove the result isn't an oracle artifact.
+/// Threshold on the observed signal reading that separates a jam (intermittent,
+/// ~0.45) from a degraded transmitter (near-dead, ~0.05).
+const SIGNAL_JAM_THRESHOLD: f64 = 0.25;
+
+/// The twin's view of the world: ground truth seen through noisy sensors.
+/// `fidelity == 1.0` returns a faithful belief (a perfect oracle); lower fidelity
+/// flips C's readiness, blurs the recharge estimate, and — crucially — blurs the
+/// signal reading the runtime uses to tell a jam from a brownout. The runtime
+/// never sees the hidden fault flags; it must *infer* them, and that inference is
+/// what can be wrong under noise.
 pub fn observe(truth: &SimState, fidelity: f64, r: &mut Rng) -> SimState {
     let mut belief = truth.clone();
     if !r.chance(fidelity) {
@@ -243,6 +308,22 @@ pub fn observe(truth: &SimState, fidelity: f64, r: &mut Rng) -> SimState {
     }
     let noise = (1.0 - fidelity) * r.range_f64(-2.5, 2.5);
     belief.charge_rate = (truth.charge_rate + noise).clamp(0.5, 6.0);
+
+    // When the beacon is down while A is still online, the cause is ambiguous —
+    // a jam and a brownout look identical except for the signal reading. Infer it
+    // (possibly wrongly) and set the belief's hidden flags to the *guess*, so the
+    // twin then simulates whichever fault the runtime believes it is facing.
+    if !truth.beacon_up && truth.a_online {
+        // The signal sits ~0.20 from the jam/brownout threshold. The noise band
+        // is 0.18 at perfect fidelity (just inside that margin, so a perfect read
+        // is never wrong) and widens as fidelity drops (so it crosses, and the
+        // call flips). This is the irreducible-looking confusion of the pair.
+        let band = 0.18 + 0.6 * (1.0 - fidelity);
+        let obs_signal = (truth.signal_reading + band * r.range_f64(-1.0, 1.0)).clamp(0.0, 1.0);
+        let guess_jam = obs_signal >= SIGNAL_JAM_THRESHOLD;
+        belief.beacon_jammed = guess_jam;
+        belief.tx_degraded = !guess_jam;
+    }
     belief
 }
 
@@ -302,6 +383,7 @@ pub fn run_with_log(cfg: &ScenarioCfg, action: Action, p: &Params) -> (SimOutcom
     let mut prev_online = s.a_online;
     let mut prev_beacon = s.beacon_up;
     let mut prev_jammed = s.beacon_jammed;
+    let mut prev_degraded = s.tx_degraded;
     while s.tick < p.horizon && s.beacon_up {
         s.step(p);
         if prev_online && !s.a_online {
@@ -310,12 +392,16 @@ pub fn run_with_log(cfg: &ScenarioCfg, action: Action, p: &Params) -> (SimOutcom
         if !prev_jammed && s.beacon_jammed {
             log.record(s.tick, EventKind::BeaconJammed);
         }
+        if !prev_degraded && s.tx_degraded {
+            log.record(s.tick, EventKind::TransmitterDegraded);
+        }
         if prev_beacon && !s.beacon_up {
             log.record(s.tick, EventKind::BeaconLost);
         }
         prev_online = s.a_online;
         prev_beacon = s.beacon_up;
         prev_jammed = s.beacon_jammed;
+        prev_degraded = s.tx_degraded;
     }
 
     s.decision_tick = s.tick;
@@ -382,8 +468,12 @@ pub fn diagnose(s: &SimState) -> Symptom {
         } else {
             Symptom::Nominal
         }
+    } else if !s.a_online {
+        Symptom::BeaconLostPower
     } else if s.beacon_jammed {
         Symptom::BeaconLostInterference
+    } else if s.tx_degraded {
+        Symptom::BeaconLostBrownout
     } else {
         Symptom::BeaconLostPower
     }
@@ -404,7 +494,7 @@ pub fn diagnose_coarse(s: &SimState) -> Symptom {
 pub fn action_changes_state(a: Action, s: &SimState) -> bool {
     match a {
         Action::DoNothing => false,
-        Action::FailoverCharger => !s.failover_active,
+        Action::FailoverCharger => !s.failover_active || s.tx_degraded,
         Action::RestartRobotA => s.a_restart_until.is_none(),
         Action::PromoteCToBeacon => s.beacon_source != RobotId::C,
         Action::HaltB => !s.b_halted,
@@ -647,5 +737,48 @@ mod tests {
             Action::HaltB
         });
         assert_eq!(intf_sym, Symptom::BeaconLostInterference);
+
+        let mut brown_sym = Symptom::Nominal;
+        run_scenario(&ScenarioCfg::brownout(false, 5), &p(), |truth| {
+            brown_sym = diagnose(truth);
+            Action::HaltB
+        });
+        assert_eq!(brown_sym, Symptom::BeaconLostBrownout);
+    }
+
+    #[test]
+    fn brownout_is_fixed_by_failover_not_switch_channel() {
+        // Failover power-cycles the radio and recovers a brownout.
+        let cfg = ScenarioCfg::brownout(false, 5);
+        let fixed = run_scenario(&cfg, &p(), |_| Action::FailoverCharger);
+        assert!(
+            fixed.safe && fixed.successful,
+            "failover recovers a brownout"
+        );
+        // Retuning the channel does nothing — the channel was never the problem.
+        let not_fixed = run_scenario(&cfg, &p(), |_| Action::SwitchBeaconChannel);
+        assert!(
+            !not_fixed.safe,
+            "switch-channel cannot fix a degraded transmitter"
+        );
+    }
+
+    #[test]
+    fn a_jam_and_a_brownout_differ_only_in_the_signal_reading() {
+        // At the decision point both have A online and the beacon down — the only
+        // distinguishing observable is the signal reading.
+        let mut jam = (false, false, 0.0);
+        run_scenario(&ScenarioCfg::interference(false, 5), &p(), |t| {
+            jam = (t.a_online, t.beacon_up, t.signal_reading);
+            Action::HaltB
+        });
+        let mut brown = (false, false, 0.0);
+        run_scenario(&ScenarioCfg::brownout(false, 5), &p(), |t| {
+            brown = (t.a_online, t.beacon_up, t.signal_reading);
+            Action::HaltB
+        });
+        assert_eq!((jam.0, jam.1), (true, false));
+        assert_eq!((brown.0, brown.1), (true, false));
+        assert!(jam.2 > brown.2, "a jam reads higher signal than a brownout");
     }
 }
